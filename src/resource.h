@@ -1,0 +1,7 @@
+#pragma once
+#define IDB_LOGO 200
+#define IDB_ICON_INPUT 201
+#define IDB_ICON_OUTPUT 202
+#define IDB_ICON_STIMULUS 203
+#define IDB_ICON_REAMP 204
+#define IDB_ICON_RECORDED 205

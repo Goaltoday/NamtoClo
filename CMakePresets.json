@@ -1,0 +1,11 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "windows-x64",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+#include "resource.h"
+IDB_LOGO          BITMAP "../resources/icons/logo.bmp"
+IDB_ICON_INPUT    BITMAP "../resources/icons/input.bmp"
+IDB_ICON_OUTPUT   BITMAP "../resources/icons/output.bmp"
+IDB_ICON_STIMULUS BITMAP "../resources/icons/stimulus.bmp"
+IDB_ICON_REAMP    BITMAP "../resources/icons/reamp.bmp"
+IDB_ICON_RECORDED BITMAP "../resources/icons/recorded.bmp"

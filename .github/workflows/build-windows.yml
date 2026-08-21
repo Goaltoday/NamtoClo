@@ -1,0 +1,27 @@
+name: Build Windows
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release --parallel 1 --verbose
+      - name: Stage app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build/Release/NamToClo.exe dist/NamToClo.exe
+          Copy-Item README.md,LICENSE,THIRD_PARTY.md dist/
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NamToClo-Windows-x64
+          path: dist

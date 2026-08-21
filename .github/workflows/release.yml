@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Stage release
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release/NamToClo | Out-Null
+          Copy-Item build/Release/NamToClo.exe release/NamToClo/NamToClo.exe
+          Copy-Item README.md,LICENSE,THIRD_PARTY.md release/NamToClo/
+          Compress-Archive -Path release/NamToClo -DestinationPath release/NamToClo-Windows-x64.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/NamToClo-Windows-x64.zip
