@@ -1,11 +1,12 @@
 # NAM to CLO v2.7.0
 
-Windows x64 application for converting Neural Amp Modeler (`.nam`) models to GP-200 compatible CLO files and uploading CLO files directly to a Valeton GP-200 over USB MIDI.
+Windows x64 application for converting Neural Amp Modeler (`.nam`) models to CLO files and uploading CLO files directly to Valeton GP-200 and GP-5 devices over USB MIDI.
 
-The application has two tabs:
+The application has three tabs:
 
 - **Convert to CLO** — convert one NAM model or every NAM model in a folder.
 - **GP-200 Uploader** — upload an existing `.clo` file to one of the 10 GP-200 SnapTone slots.
+- **GP-5 Uploader** — adapt a compatible CLO to the GP-5 transfer format and upload it to SnapTone 1-80.
 
 > This is an independent research/reimplementation project and is not affiliated with or endorsed by Valeton or Hotone.
 
@@ -205,6 +206,44 @@ Uploading replaces the CLO currently stored in the selected destination slot.
 ### 4. Upload
 
 Press **Upload to GP-200**. The transfer progress bar and bottom status line show the current transfer state. Do not disconnect or power off the GP-200 while the upload is in progress.
+
+---
+
+## GP-5 Uploader
+
+The GP-5 uploader implements the USB-MIDI transfer reconstructed from Valeton Suite captures. It accepts compatible VTSI/HTSI CLO files containing **A=128** and at least **512 B taps**. This includes the 1024-tap CLO files produced by the current converter and 2048-tap Valeton/Hotone CLO files.
+
+### 1. Connect the GP-5
+
+Connect and power on the GP-5, open the **GP-5 Uploader** tab, and press **Rescan** if the MIDI device was connected after the application started.
+
+### 2. Select the CLO
+
+Press **Browse CLO...** or drag a `.clo` file onto the application while the GP-5 tab is active. The source file is not modified.
+
+Before transfer, the uploader creates the GP-5 runtime representation in memory:
+
+```text
+VTSI
+A = 128 taps
+B = first 512 taps
+declared size = 0x0A88
+payload size  = 0x0A00
+```
+
+The internal CLO CRC16/MODBUS is recalculated automatically.
+
+### 3. Select SnapTone 1-80
+
+Choose the destination slot. Valeton Suite uses zero-based slot numbering internally, so visible SnapTone 1 maps to slot byte `0x00` and visible SnapTone 80 maps to `0x4F`.
+
+### 4. Upload
+
+Press **Upload to GP-5**. The uploader wraps the compact CLO in the reconstructed 74-byte GP-5 SnapTone header, splits the 2770-byte transfer into 146 command-`0x92` blocks, calculates the packet CRC8, nibble-encodes each SysEx message, and waits for the GP-5 ACK before advancing to the next block.
+
+The progress bar reaches 146 blocks and the application then waits for the final GP-5 completion message. A block is retried automatically if its ACK is not received within the timeout.
+
+> The GP-5 upload implementation is based on USB-MIDI captures of Valeton Suite uploads to SnapTone 51 and SnapTone 80. It intentionally implements only the transfer required for SnapTone upload; it does not reproduce the full Valeton Suite startup/state synchronization.
 
 ---
 

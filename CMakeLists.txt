@@ -27,6 +27,10 @@ add_executable(NamToClo WIN32
     src/gp200_clo_upload.hpp
     src/gp200_midi.cpp
     src/gp200_midi.hpp
+    src/gp5_clo_upload.cpp
+    src/gp5_clo_upload.hpp
+    src/gp5_midi.cpp
+    src/gp5_midi.hpp
     src/resources.rc
     src/resource.h
 )

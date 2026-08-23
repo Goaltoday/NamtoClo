@@ -24,6 +24,10 @@ std::wstring lower(std::wstring s) {
 
 bool looksLikeGp200(const std::wstring& name) {
     const auto n = lower(name);
+    // Keep the historical Valeton fallback, but never claim a GP-5 port in
+    // the GP-200 tab now that both devices are supported by the same app.
+    if (n.find(L"gp-5") != std::wstring::npos || n.find(L"gp5") != std::wstring::npos)
+        return false;
     return n.find(L"gp-200") != std::wstring::npos
         || n.find(L"gp200") != std::wstring::npos
         || n.find(L"valeton") != std::wstring::npos;

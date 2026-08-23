@@ -1,6 +1,7 @@
 #include "native_converter.hpp"
 #include "common.hpp"
 #include "gp200_midi.hpp"
+#include "gp5_midi.hpp"
 #include "resource.h"
 
 #include <windows.h>
@@ -24,6 +25,8 @@ constexpr UINT WM_APP_DONE_SINGLE = WM_APP + 2;
 constexpr UINT WM_APP_DONE_BATCH = WM_APP + 3;
 constexpr UINT WM_APP_UPLOAD_PROGRESS = WM_APP + 4;
 constexpr UINT WM_APP_UPLOAD_DONE = WM_APP + 5;
+constexpr UINT WM_APP_GP5_UPLOAD_PROGRESS = WM_APP + 6;
+constexpr UINT WM_APP_GP5_UPLOAD_DONE = WM_APP + 7;
 constexpr int IDC_INPUT_PATH = 101;
 constexpr int IDC_LOAD_FILE = 102;
 constexpr int IDC_LOAD_FOLDER = 103;
@@ -52,6 +55,13 @@ constexpr int IDC_UPLOADER_RESCAN = 128;
 constexpr int IDC_UPLOADER_UPLOAD = 129;
 constexpr int IDC_UPLOADER_DEVICE = 130;
 constexpr int IDC_UPLOADER_PROGRESS = 131;
+constexpr int IDC_GP5_CLO_PATH = 132;
+constexpr int IDC_GP5_BROWSE = 133;
+constexpr int IDC_GP5_SLOT = 134;
+constexpr int IDC_GP5_RESCAN = 135;
+constexpr int IDC_GP5_UPLOAD = 136;
+constexpr int IDC_GP5_DEVICE = 137;
+constexpr int IDC_GP5_PROGRESS = 138;
 
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
@@ -89,6 +99,13 @@ HWND gUploaderRescanButton = nullptr;
 HWND gUploaderUploadButton = nullptr;
 HWND gUploaderDevice = nullptr;
 HWND gUploaderProgress = nullptr;
+HWND gGp5CloEdit = nullptr;
+HWND gGp5BrowseButton = nullptr;
+HWND gGp5SlotCombo = nullptr;
+HWND gGp5RescanButton = nullptr;
+HWND gGp5UploadButton = nullptr;
+HWND gGp5Device = nullptr;
+HWND gGp5Progress = nullptr;
 HWND gInputEdit = nullptr;
 HWND gOutEdit = nullptr;
 HWND gLoadFileButton = nullptr;
@@ -124,6 +141,7 @@ UiMetrics gUi{};
 bool gBusy = false;
 InputMode gInputMode = InputMode::None;
 bool gUploadBusy = false;
+bool gGp5UploadBusy = false;
 
 struct UploadProgressMessage {
     int current = 0;
@@ -208,8 +226,12 @@ void applyFont(HWND h, HFONT font) {
 
 void applyFont(HWND h) { applyFont(h, gFont); }
 
-bool uploaderTabSelected() {
+bool gp200UploaderTabSelected() {
     return gBackendTabs && TabCtrl_GetCurSel(gBackendTabs) == 1;
+}
+
+bool gp5UploaderTabSelected() {
+    return gBackendTabs && TabCtrl_GetCurSel(gBackendTabs) == 2;
 }
 
 void showControl(HWND h, bool show) {
@@ -238,6 +260,16 @@ void showUploaderUi(HWND hwnd, bool show) {
         showControl(GetDlgItem(hwnd, id), show);
 }
 
+void showGp5UploaderUi(HWND hwnd, bool show) {
+    const HWND controls[] = {
+        gGp5CloEdit, gGp5BrowseButton, gGp5SlotCombo,
+        gGp5RescanButton, gGp5UploadButton, gGp5Device, gGp5Progress
+    };
+    for (HWND h : controls) showControl(h, show);
+    for (int id : {1015,1016,1017,1018})
+        showControl(GetDlgItem(hwnd, id), show);
+}
+
 void refreshUploaderDetection() {
     const auto d = ntc::gp200::detectGp200Midi();
     setText(gUploaderDevice, ntc::gp200::describeDetection(d));
@@ -245,15 +277,29 @@ void refreshUploaderDetection() {
         EnableWindow(gUploaderUploadButton, d.inputFound && d.outputFound ? TRUE : FALSE);
 }
 
+void refreshGp5Detection() {
+    const auto d = ntc::gp5::detectGp5Midi();
+    setText(gGp5Device, ntc::gp5::describeDetection(d));
+    if (!gGp5UploadBusy)
+        EnableWindow(gGp5UploadButton, d.inputFound && d.outputFound ? TRUE : FALSE);
+}
+
 void updateBackendUi() {
     HWND hwnd = gBackendTabs ? GetParent(gBackendTabs) : nullptr;
-    const bool uploader = uploaderTabSelected();
-    showConversionUi(hwnd, !uploader);
-    showUploaderUi(hwnd, uploader);
-    if (uploader) {
+    const int selected = gBackendTabs ? TabCtrl_GetCurSel(gBackendTabs) : 0;
+    const bool gp200 = selected == 1;
+    const bool gp5 = selected == 2;
+    showConversionUi(hwnd, selected == 0);
+    showUploaderUi(hwnd, gp200);
+    showGp5UploaderUi(hwnd, gp5);
+    if (gp200) {
         setText(gSubtitle, L"Upload CLO files directly to a GP-200 SnapTone slot via USB MIDI.");
         refreshUploaderDetection();
         if (!gUploadBusy) setText(gStatus, L"GP-200 Uploader ready.");
+    } else if (gp5) {
+        setText(gSubtitle, L"Adapt a CLO to the GP-5 A128/B512 transfer format and upload it to SnapTone 1-80.");
+        refreshGp5Detection();
+        if (!gGp5UploadBusy) setText(gStatus, L"GP-5 Uploader ready.");
     } else {
         setText(gSubtitle, L"Convert one NAM or batch-convert every NAM in a selected folder.");
         setText(gInfo,
@@ -427,7 +473,7 @@ ntc::TailMode selectedTailMode() {
 }
 
 void updateTailControls() {
-    if (uploaderTabSelected()) return;
+    if (gp200UploaderTabSelected() || gp5UploaderTabSelected()) return;
     // Release UI always uses the official/original 50 s stimulus. Tail/Reamp
     // remains selectable between the original tail and a recorded WAV.
     EnableWindow(gTailCombo, TRUE);
@@ -575,6 +621,67 @@ void startUploader(HWND hwnd) {
     }).detach();
 }
 
+void chooseGp5Clo(HWND hwnd) {
+    wchar_t file[32768]{};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(file));
+    ofn.lpstrFilter = L"CLO files (*.clo)\0*.clo\0All files (*.*)\0*.*\0\0";
+    ofn.lpstrDefExt = L"clo";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    if (GetOpenFileNameW(&ofn)) {
+        setText(gGp5CloEdit, file);
+        setText(gStatus, L"CLO selected. Choose SnapTone 1-80 and press Upload to GP-5.");
+    }
+}
+
+void startGp5Uploader(HWND hwnd) {
+    if (gGp5UploadBusy) return;
+    const std::wstring clo = getText(gGp5CloEdit);
+    if (clo.empty()) {
+        MessageBoxW(hwnd, L"Select a .clo file first.", L"GP-5 Uploader", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    const int slot = static_cast<int>(SendMessageW(gGp5SlotCombo, CB_GETCURSEL, 0, 0));
+    if (slot < 0 || slot >= 80) {
+        MessageBoxW(hwnd, L"Select a destination SnapTone slot (1-80).", L"GP-5 Uploader", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    const auto d = ntc::gp5::detectGp5Midi();
+    if (!d.inputFound || !d.outputFound) {
+        const auto msg = ntc::gp5::describeDetection(d);
+        setText(gGp5Device, msg);
+        MessageBoxW(hwnd, msg.c_str(), L"GP-5 Uploader", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    gGp5UploadBusy = true;
+    EnableWindow(gBackendTabs, FALSE);
+    EnableWindow(gGp5BrowseButton, FALSE);
+    EnableWindow(gGp5SlotCombo, FALSE);
+    EnableWindow(gGp5RescanButton, FALSE);
+    EnableWindow(gGp5UploadButton, FALSE);
+    SendMessageW(gGp5Progress, PBM_SETRANGE32, 0, 146);
+    SendMessageW(gGp5Progress, PBM_SETPOS, 0, 0);
+    setText(gStatus, L"Preparing GP-5 A128/B512 transfer...");
+
+    std::thread([hwnd, clo, slot] {
+        auto result = ntc::gp5::uploadCloToGp5(fs::path(clo), slot,
+            [hwnd](int current, int total, const std::wstring& status) {
+                auto* m = new UploadProgressMessage{};
+                m->current = current;
+                m->total = total;
+                m->status = status;
+                PostMessageW(hwnd, WM_APP_GP5_UPLOAD_PROGRESS, 0, reinterpret_cast<LPARAM>(m));
+            });
+        auto* posted = new ntc::gp5::UploadResult(std::move(result));
+        PostMessageW(hwnd, WM_APP_GP5_UPLOAD_DONE, 0, reinterpret_cast<LPARAM>(posted));
+    }).detach();
+}
+
 void moveCtrl(HWND h, int x, int y, int w, int hgt) {
     if (h) MoveWindow(h, x, y, w, hgt, TRUE);
 }
@@ -668,6 +775,18 @@ void layoutControls(HWND hwnd) {
     moveCtrl(gUploaderProgress, ux, gUi.uploaderCard.top + 306, ur - ux, 22);
     moveCtrl(gUploaderUploadButton, center - 120, gUi.uploaderCard.top + 340, 240, 38);
 
+    moveCtrl(GetDlgItem(hwnd, 1015), ux, gUi.uploaderCard.top + 28, 330, 22);
+    moveCtrl(gGp5CloEdit, ux, gUi.uploaderCard.top + 56, ur - ux - 136, 30);
+    moveCtrl(gGp5BrowseButton, ur - 124, gUi.uploaderCard.top + 52, 124, 34);
+    moveCtrl(GetDlgItem(hwnd, 1016), ux, gUi.uploaderCard.top + 112, 260, 22);
+    moveCtrl(gGp5SlotCombo, ux, gUi.uploaderCard.top + 140, 310, 260);
+    moveCtrl(GetDlgItem(hwnd, 1017), ux, gUi.uploaderCard.top + 196, 220, 22);
+    moveCtrl(gGp5Device, ux, gUi.uploaderCard.top + 224, ur - ux - 136, 28);
+    moveCtrl(gGp5RescanButton, ur - 124, gUi.uploaderCard.top + 220, 124, 34);
+    moveCtrl(GetDlgItem(hwnd, 1018), ux, gUi.uploaderCard.top + 276, 220, 22);
+    moveCtrl(gGp5Progress, ux, gUi.uploaderCard.top + 306, ur - ux, 22);
+    moveCtrl(gGp5UploadButton, center - 120, gUi.uploaderCard.top + 340, 240, 38);
+
     moveCtrl(gStatus, 44, gUi.footer.top + 8, rc.right - 220, 22);
     moveCtrl(gVersion, rc.right - 140, gUi.footer.top + 8, 110, 22);
 }
@@ -695,13 +814,15 @@ void createUi(HWND hwnd) {
                                     WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FIXEDWIDTH,
                                     0, 0, 100, 32, hwnd, controlId(IDC_BACKEND_TABS), nullptr, nullptr);
     applyFont(gBackendTabs);
-    SendMessageW(gBackendTabs, TCM_SETITEMSIZE, 0, MAKELPARAM(220, 25));
+    SendMessageW(gBackendTabs, TCM_SETITEMSIZE, 0, MAKELPARAM(190, 25));
     TCITEMW tab{};
     tab.mask = TCIF_TEXT;
     tab.pszText = const_cast<LPWSTR>(L"Convert to CLO");
     TabCtrl_InsertItem(gBackendTabs, 0, &tab);
     tab.pszText = const_cast<LPWSTR>(L"GP-200 Uploader");
     TabCtrl_InsertItem(gBackendTabs, 1, &tab);
+    tab.pszText = const_cast<LPWSTR>(L"GP-5 Uploader");
+    TabCtrl_InsertItem(gBackendTabs, 2, &tab);
     TabCtrl_SetCurSel(gBackendTabs, 0);
 
     createSectionLabel(hwnd, 1002, L"Input NAM or folder");
@@ -801,6 +922,40 @@ void createUi(HWND hwnd) {
                                           0, 0, 240, 38, hwnd, controlId(IDC_UPLOADER_UPLOAD), nullptr, nullptr);
     applyFont(gUploaderUploadButton);
 
+    createSectionLabel(hwnd, 1015, L"CLO file (adapted automatically to GP-5 B512)");
+    createSectionLabel(hwnd, 1016, L"Destination SnapTone slot (1-80)");
+    createSectionLabel(hwnd, 1017, L"USB MIDI device");
+    createSectionLabel(hwnd, 1018, L"Transfer progress");
+
+    gGp5CloEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                  WS_CHILD | ES_AUTOHSCROLL | ES_READONLY,
+                                  0, 0, 100, 30, hwnd, controlId(IDC_GP5_CLO_PATH), nullptr, nullptr);
+    applyFont(gGp5CloEdit);
+    gGp5BrowseButton = CreateWindowW(L"BUTTON", L"Browse CLO...", WS_CHILD | BS_OWNERDRAW,
+                                     0, 0, 124, 34, hwnd, controlId(IDC_GP5_BROWSE), nullptr, nullptr);
+    applyFont(gGp5BrowseButton);
+    gGp5SlotCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                  0, 0, 310, 260, hwnd, controlId(IDC_GP5_SLOT), nullptr, nullptr);
+    applyFont(gGp5SlotCombo);
+    for (int i = 1; i <= 80; ++i) {
+        const std::wstring name = L"SnapTone " + std::to_wstring(i);
+        SendMessageW(gGp5SlotCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
+    }
+    SendMessageW(gGp5SlotCombo, CB_SETCURSEL, 0, 0);
+    gGp5Device = CreateWindowW(L"STATIC", L"GP-5 MIDI not scanned yet.", WS_CHILD,
+                               0, 0, 100, 24, hwnd, controlId(IDC_GP5_DEVICE), nullptr, nullptr);
+    applyFont(gGp5Device);
+    gGp5RescanButton = CreateWindowW(L"BUTTON", L"Rescan", WS_CHILD | BS_OWNERDRAW,
+                                     0, 0, 124, 34, hwnd, controlId(IDC_GP5_RESCAN), nullptr, nullptr);
+    applyFont(gGp5RescanButton);
+    gGp5Progress = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD | PBS_SMOOTH,
+                                   0, 0, 100, 22, hwnd, controlId(IDC_GP5_PROGRESS), nullptr, nullptr);
+    SendMessageW(gGp5Progress, PBM_SETRANGE32, 0, 146);
+    SendMessageW(gGp5Progress, PBM_SETPOS, 0, 0);
+    gGp5UploadButton = CreateWindowW(L"BUTTON", L"Upload to GP-5", WS_CHILD | BS_OWNERDRAW,
+                                     0, 0, 240, 38, hwnd, controlId(IDC_GP5_UPLOAD), nullptr, nullptr);
+    applyFont(gGp5UploadButton);
+
     gInfo = CreateWindowW(L"STATIC",
                           L"CLO files will be created as Mono, PCM16, 44.1 kHz.\r\n"
                           L"Audio will be trimmed or padded to exactly 20.000 seconds.",
@@ -897,7 +1052,7 @@ void paintBackground(HWND hwnd, HDC hdc) {
 
     drawBitmap(hdc, gLogoBitmap, 28, 18);
 
-    if (uploaderTabSelected()) {
+    if (gp200UploaderTabSelected() || gp5UploaderTabSelected()) {
         drawRoundedRect(hdc, gUi.uploaderCard, kColorCard, kColorBorder, 18);
     } else {
         drawSectionCard(hdc, gUi.sectionInput, 0);
@@ -924,7 +1079,7 @@ void drawButton(DRAWITEMSTRUCT* dis) {
     const bool disabled = (dis->itemState & ODS_DISABLED) != 0;
     const bool selected = (dis->itemState & ODS_SELECTED) != 0;
     const int id = static_cast<int>(dis->CtlID);
-    const bool primary = id == IDC_CONVERT || id == IDC_UPLOADER_UPLOAD;
+    const bool primary = id == IDC_CONVERT || id == IDC_UPLOADER_UPLOAD || id == IDC_GP5_UPLOAD;
 
     COLORREF fill = primary ? (selected ? kColorAccentDark : kColorAccent) : kColorCard;
     COLORREF border = primary ? (selected ? kColorAccentDark : kColorAccentDark) : kColorAccent;
@@ -1000,7 +1155,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             || ctrl == GetDlgItem(hwnd, 1005) || ctrl == GetDlgItem(hwnd, 1006) || ctrl == GetDlgItem(hwnd, 1007)
             || ctrl == GetDlgItem(hwnd, 1008) || ctrl == GetDlgItem(hwnd, 1009) || ctrl == GetDlgItem(hwnd, 1010)
             || ctrl == GetDlgItem(hwnd, 1011) || ctrl == GetDlgItem(hwnd, 1012) || ctrl == GetDlgItem(hwnd, 1013)
-            || ctrl == GetDlgItem(hwnd, 1014) || ctrl == gUploaderDevice) {
+            || ctrl == GetDlgItem(hwnd, 1014) || ctrl == gUploaderDevice
+            || ctrl == GetDlgItem(hwnd, 1015) || ctrl == GetDlgItem(hwnd, 1016)
+            || ctrl == GetDlgItem(hwnd, 1017) || ctrl == GetDlgItem(hwnd, 1018) || ctrl == gGp5Device) {
             SetTextColor(hdc, ctrl == gSubtitle ? kColorSubtleText : kColorText);
             return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
         }
@@ -1052,6 +1209,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             setText(gStatus, getText(gUploaderDevice));
             return 0;
         case IDC_UPLOADER_UPLOAD: startUploader(hwnd); return 0;
+        case IDC_GP5_BROWSE: chooseGp5Clo(hwnd); return 0;
+        case IDC_GP5_RESCAN:
+            refreshGp5Detection();
+            setText(gStatus, getText(gGp5Device));
+            return 0;
+        case IDC_GP5_UPLOAD: startGp5Uploader(hwnd); return 0;
         default: break;
         }
         break;
@@ -1061,14 +1224,22 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (DragQueryFileW(drop, 0, path, static_cast<UINT>(std::size(path)))) {
             fs::path p(path);
             std::error_code ec;
-            if (uploaderTabSelected()) {
+            if (gp200UploaderTabSelected() || gp5UploaderTabSelected()) {
                 std::wstring ext = p.extension().wstring();
                 for (auto& c : ext) c = static_cast<wchar_t>(towlower(c));
                 if (ext == L".clo") {
-                    setText(gUploaderCloEdit, p.wstring());
-                    setText(gStatus, L"CLO selected. Choose a destination slot and press Upload to GP-200.");
+                    if (gp5UploaderTabSelected()) {
+                        setText(gGp5CloEdit, p.wstring());
+                        setText(gStatus, L"CLO selected. Choose SnapTone 1-80 and press Upload to GP-5.");
+                    } else {
+                        setText(gUploaderCloEdit, p.wstring());
+                        setText(gStatus, L"CLO selected. Choose a destination slot and press Upload to GP-200.");
+                    }
                 } else {
-                    MessageBoxW(hwnd, L"The GP-200 Uploader accepts .clo files.", L"GP-200 Uploader", MB_OK | MB_ICONINFORMATION);
+                    const bool gp5 = gp5UploaderTabSelected();
+                    MessageBoxW(hwnd,
+                                gp5 ? L"The GP-5 Uploader accepts .clo files." : L"The GP-200 Uploader accepts .clo files.",
+                                gp5 ? L"GP-5 Uploader" : L"GP-200 Uploader", MB_OK | MB_ICONINFORMATION);
                 }
             } else if (fs::is_directory(p, ec) && !ec) setNamFolder(p);
             else setSingleNam(p);
@@ -1105,6 +1276,34 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 MessageBoxW(hwnd, r->message.c_str(), L"GP-200 Uploader", MB_OK | MB_ICONINFORMATION);
             } else {
                 MessageBoxW(hwnd, r->message.c_str(), L"GP-200 Uploader", MB_OK | MB_ICONERROR);
+            }
+        }
+        return 0;
+    }
+    case WM_APP_GP5_UPLOAD_PROGRESS: {
+        std::unique_ptr<UploadProgressMessage> m(reinterpret_cast<UploadProgressMessage*>(lParam));
+        if (m) {
+            SendMessageW(gGp5Progress, PBM_SETRANGE32, 0, m->total > 0 ? m->total : 146);
+            SendMessageW(gGp5Progress, PBM_SETPOS, m->current, 0);
+            setText(gStatus, m->status);
+        }
+        return 0;
+    }
+    case WM_APP_GP5_UPLOAD_DONE: {
+        std::unique_ptr<ntc::gp5::UploadResult> r(reinterpret_cast<ntc::gp5::UploadResult*>(lParam));
+        gGp5UploadBusy = false;
+        EnableWindow(gBackendTabs, TRUE);
+        EnableWindow(gGp5BrowseButton, TRUE);
+        EnableWindow(gGp5SlotCombo, TRUE);
+        EnableWindow(gGp5RescanButton, TRUE);
+        refreshGp5Detection();
+        if (r) {
+            setText(gStatus, r->message);
+            if (r->ok) {
+                SendMessageW(gGp5Progress, PBM_SETPOS, 146, 0);
+                MessageBoxW(hwnd, r->message.c_str(), L"GP-5 Uploader", MB_OK | MB_ICONINFORMATION);
+            } else {
+                MessageBoxW(hwnd, r->message.c_str(), L"GP-5 Uploader", MB_OK | MB_ICONERROR);
             }
         }
         return 0;
