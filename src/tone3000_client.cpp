@@ -1,12 +1,12 @@
 #include "tone3000_client.hpp"
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <wincrypt.h>
 #include <winhttp.h>
 #include <bcrypt.h>
 #include <shellapi.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>

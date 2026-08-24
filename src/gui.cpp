@@ -1018,15 +1018,15 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1013, L"USB MIDI device");
     createSectionLabel(hwnd, 1014, L"Transfer progress");
 
-    createSectionLabel(hwnd, L"Publishable API key", 1019);
+    createSectionLabel(hwnd, 1019, L"Publishable API key");
     gT3kKey = CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|ES_AUTOHSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_KEY),nullptr,nullptr); applyFont(gT3kKey);
     gT3kConnect = CreateWindowW(L"BUTTON",L"Connect",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_CONNECT),nullptr,nullptr); applyFont(gT3kConnect);
-    createSectionLabel(hwnd, L"Search NAM captures", 1020);
+    createSectionLabel(hwnd, 1020, L"Search NAM captures");
     gT3kSearch = CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|ES_AUTOHSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_SEARCH),nullptr,nullptr); applyFont(gT3kSearch);
     gT3kSearchButton = CreateWindowW(L"BUTTON",L"Search",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_SEARCH_BUTTON),nullptr,nullptr); applyFont(gT3kSearchButton);
-    createSectionLabel(hwnd, L"Results", 1021);
+    createSectionLabel(hwnd, 1021, L"Results");
     gT3kResults = CreateWindowExW(WS_EX_CLIENTEDGE,L"LISTBOX",L"",WS_CHILD|LBS_NOTIFY|WS_VSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_RESULTS),nullptr,nullptr); applyFont(gT3kResults);
-    createSectionLabel(hwnd, L"NAM model", 1022);
+    createSectionLabel(hwnd, 1022, L"NAM model");
     gT3kModels = CreateWindowW(L"COMBOBOX",L"",WS_CHILD|CBS_DROPDOWNLIST|WS_VSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_MODELS),nullptr,nullptr); applyFont(gT3kModels);
     gT3kUse = CreateWindowW(L"BUTTON",L"Load selected NAM",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_USE),nullptr,nullptr); applyFont(gT3kUse);
     gT3kState = CreateWindowW(L"STATIC",L"Not connected.",WS_CHILD,0,0,0,0,hwnd,controlId(IDC_T3K_STATE),nullptr,nullptr); applyFont(gT3kState);

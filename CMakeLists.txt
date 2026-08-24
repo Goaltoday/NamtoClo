@@ -147,6 +147,10 @@ target_sources(NamToClo PRIVATE
     "${_ntc_ooura_dir}/src/fft4g.c"
 )
 target_include_directories(NamToClo PRIVATE "${_ntc_ooura_dir}/src")
+# Tone3000 client uses the nlohmann JSON headers bundled with NAMCore.
+# Add it explicitly to the executable target; OBJECT-library usage does not
+# reliably propagate this include directory with all CMake/MSVC combinations.
+target_include_directories(NamToClo PRIVATE "${_ntc_namcore_dir}/Dependencies/nlohmann")
 # r8brain releases before v7 are not fully header-only; the historical
 # template-era branch used by the official converter ships r8bbase.cpp.
 # Build that third-party translation unit separately so our /W4 policy does
