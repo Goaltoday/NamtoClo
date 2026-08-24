@@ -71,6 +71,26 @@ bool readMono44100(const fs::path& path, std::vector<float>& out, std::string& e
     return true;
 }
 
+bool writeMonoFloat32Wav(const fs::path& path, const std::vector<float>& samples, std::string& error) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) { error = "Cannot write Tone Match diagnostic WAV: " + pathToUtf8(path); return false; }
+    const std::uint16_t format = 3; // IEEE float
+    const std::uint16_t channels = 1;
+    const std::uint16_t bits = 32;
+    const std::uint16_t blockAlign = channels * (bits / 8);
+    const std::uint32_t byteRate = kSampleRate * blockAlign;
+    const std::uint32_t dataBytes = static_cast<std::uint32_t>(samples.size() * sizeof(float));
+    const std::uint32_t riffSize = 36u + dataBytes;
+    auto w16=[&](std::uint16_t v){ char b[2]{char(v&0xff),char((v>>8)&0xff)}; out.write(b,2); };
+    auto w32=[&](std::uint32_t v){ char b[4]{char(v&0xff),char((v>>8)&0xff),char((v>>16)&0xff),char((v>>24)&0xff)}; out.write(b,4); };
+    out.write("RIFF",4); w32(riffSize); out.write("WAVE",4);
+    out.write("fmt ",4); w32(16); w16(format); w16(channels); w32(kSampleRate); w32(byteRate); w16(blockAlign); w16(bits);
+    out.write("data",4); w32(dataBytes);
+    if (!samples.empty()) out.write(reinterpret_cast<const char*>(samples.data()), static_cast<std::streamsize>(dataBytes));
+    if (!out) { error = "Failed while writing Tone Match diagnostic WAV: " + pathToUtf8(path); return false; }
+    return true;
+}
+
 struct Biquad { double b0=1,b1=0,b2=0,a1=0,a2=0,z1=0,z2=0; float process(float x){ double y=b0*x+z1; z1=b1*x-a1*y+z2; z2=b2*x-a2*y; return static_cast<float>(y);} };
 struct AP { float a=0,s=0; float process(float x){ float y=s+a*x; s=x-a*y; return y; } };
 struct Poly {
@@ -252,8 +272,6 @@ bool refineCloBOnly(const fs::path& inputClo2048,
                     const CloRefineConfig& config,
                     std::string& error,
                     const RefineStatusCallback& status) {
-    (void)config;
-
     std::vector<std::uint8_t> bytes;
     if (!readFileBytes(inputClo2048, bytes, error)) return false;
 
@@ -284,6 +302,14 @@ bool refineCloBOnly(const fs::path& inputClo2048,
     std::vector<float> sourceTail(orig.begin() + static_cast<std::ptrdiff_t>(sourceStart), orig.end());
     std::vector<float> targetTail(target.begin() + static_cast<std::ptrdiff_t>(targetStart), target.end());
 
+    if (!config.debugDirectory.empty()) {
+        std::error_code ec;
+        fs::create_directories(config.debugDirectory, ec);
+        if (ec) { error = "Cannot create Tone Match debug directory: " + pathToUtf8(config.debugDirectory); return false; }
+        if (!writeMonoFloat32Wav(config.debugDirectory / L"ToneMatch_TARGET_NAM_20s.wav", targetTail, error)) return false;
+        if (!writeMonoFloat32Wav(config.debugDirectory / L"ToneMatch_SOURCE_CLO_20s.wav", sourceTail, error)) return false;
+    }
+
     // Match the VST Tone Match behaviour: analyse SOURCE at its real level.
     // Do not least-squares scale the CLO render toward TARGET before the
     // spectral comparison, otherwise part of the level difference is removed
@@ -302,6 +328,11 @@ bool refineCloBOnly(const fs::path& inputClo2048,
     // 2048-sample minimum-phase IR.  The IR is now passed in memory, so no
     // diagnostic/intermediate WAV is written to disk.
     const auto ir = v26minPhaseIr(comparison, kV26Smooth);
+
+    if (!config.debugDirectory.empty()) {
+        if (!writeMonoFloat32Wav(config.debugDirectory / L"ToneMatch_IR_2048.wav", ir, error)) return false;
+        if (status) status(L"Tone Match diagnostics written to _TONEMATCH_DEBUG.");
+    }
 
     if (status) status(L"Applying Tone Match correction to Block B...");
     CorrectiveIrStats correctionStats;

@@ -1737,7 +1737,10 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
 
         const fs::path targetWav=work/L"refine_nam_output.wav";if(!writeMonoFloat32Wav(targetWav,refineTarget44100,44100,error)){r.error=error;fs::remove_all(work,ec);return r;}
         toneMatched2048=work/L"native_2048_TONEMATCH.clo";
-        if(!refineCloBOnly(toneMatchInputClo,refineStimulus,targetWav,toneMatched2048,refine,error,status)){r.error=error.empty()?"CLO refinement failed.":error;fs::remove_all(work,ec);return r;}
+        CloRefineConfig refineRun=refine;
+        refineRun.debugDirectory=outputDirectory/L"_TONEMATCH_DEBUG"/inputNam.stem();
+        fs::remove_all(refineRun.debugDirectory,ec); ec.clear();
+        if(!refineCloBOnly(toneMatchInputClo,refineStimulus,targetWav,toneMatched2048,refineRun,error,status)){r.error=error.empty()?"CLO refinement failed.":error;fs::remove_all(work,ec);return r;}
     }
 
     if(refine.enabled){
