@@ -16,10 +16,6 @@ struct CloRefineConfig {
     // rendered through both the verified NAM Full path and the original CLO,
     // so Tone Match compares the same performance through both models.
     fs::path referenceWav;
-    // Optional persistent diagnostics for Tone Match. When set, the exact
-    // 20-second NAM target, CLO source and generated minimum-phase IR used
-    // by the comparison are written here for A/B verification.
-    fs::path debugDirectory;
 };
 
 using RefineStatusCallback = std::function<void(const std::wstring&)>;
