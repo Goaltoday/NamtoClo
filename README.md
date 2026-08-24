@@ -128,7 +128,9 @@ The generated filename remains:
 
 ### Corrective IR and Tone Match together
 
-In the current release, **Tone Match takes precedence**. If Tone Match is enabled, only the Tone Match result is exported and the Corrective IR path is not applied to that Tone Match output. Use Corrective IR with Tone Match disabled when you want the corrective-IR result.
+When both options are enabled, the normal native conversion is completed first. The selected Corrective IR is then applied to the native CLO, and the same effective Corrective IR (including the CLO-side RMS normalization and post gain) is applied to the NAM render used as the Tone Match target. Tone Match therefore compares **NAM + Corrective IR** against **CLO + Corrective IR**, and refines the already-corrected CLO.
+
+Using only Corrective IR or only Tone Match keeps the same behavior as before.
 
 ---
 
