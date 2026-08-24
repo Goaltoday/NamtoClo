@@ -1629,6 +1629,31 @@ bool writeMonoFloat32Wav(const fs::path&path,const std::vector<float>&samples,st
 }
 
 
+std::vector<float> applyCorrectiveIrToToneTarget(const std::vector<float>& input,
+                                                   const std::vector<float>& correctiveIr,
+                                                   double finalGain){
+    if(input.empty()||correctiveIr.empty())return input;
+    const std::size_t irCount=std::min<std::size_t>(correctiveIr.size(),kB);
+    constexpr std::size_t fftSize=4096;
+    constexpr std::size_t blockSize=fftSize-kB+1;
+    std::vector<std::complex<double>> H(fftSize);
+    for(std::size_t i=0;i<irCount;++i)H[i]=static_cast<double>(correctiveIr[i])*finalGain;
+    fft(H,false);
+    std::vector<float> output(input.size(),0.0f);
+    std::vector<std::complex<double>> X(fftSize);
+    for(std::size_t pos=0;pos<input.size();pos+=blockSize){
+        std::fill(X.begin(),X.end(),std::complex<double>{});
+        const std::size_t take=std::min(blockSize,input.size()-pos);
+        for(std::size_t i=0;i<take;++i)X[i]=input[pos+i];
+        fft(X,false);
+        for(std::size_t i=0;i<fftSize;++i)X[i]*=H[i];
+        fft(X,true);
+        const std::size_t produced=std::min<std::size_t>(take+irCount-1,input.size()-pos);
+        for(std::size_t i=0;i<produced;++i)output[pos+i]+=static_cast<float>(X[i].real());
+    }
+    return output;
+}
+
 std::vector<float> prepareToneTarget44100(const std::vector<float>&renderedWithGuard,double sourceRate){
     const std::size_t n70=static_cast<std::size_t>(static_cast<float>(sourceRate)*70.0f);
     std::vector<float> source70(n70,0.0f);
@@ -1669,6 +1694,20 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
 
     const fs::path original2048=work/L"native_original_2048.clo";if(!serialize2048(original2048,m,sr,error)){r.error=error;fs::remove_all(work,ec);return r;}
 
+    fs::path sourceForOutput=original2048;
+    fs::path corrected2048;
+    CorrectiveIrStats correctiveStats;
+    std::vector<float> correctiveIr;
+    if(correction.enabled){
+        if(correction.wav.empty()){r.error="Select a Corrective IR WAV file.";fs::remove_all(work,ec);return r;}
+        report(status,L"Applying Corrective IR...");
+        corrected2048=work/L"native_2048_corrected.clo";
+        if(!loadCorrectiveIrSamples(correction.wav,correctiveIr,error)){r.error=error.empty()?"Corrective IR failed.":error;fs::remove_all(work,ec);return r;}
+        if(!applyCorrectiveIrToClo(original2048,correctiveIr,corrected2048,correctiveStats,error)){r.error=error.empty()?"Corrective IR failed.":error;fs::remove_all(work,ec);return r;}
+        report(status,L"Corrective IR applied: linear convolution, RMS match, -6 dB post gain. RMS gain "+std::to_wstring(correctiveStats.rmsGainDb)+L" dB; total "+std::to_wstring(correctiveStats.totalGainDb)+L" dB.");
+        sourceForOutput=corrected2048;
+    }
+
     fs::path toneMatched2048;
     if(refine.enabled){
         report(status,L"Tone Match: preparing matched NAM target...");
@@ -1681,21 +1720,25 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
             std::vector<float> refineS44;std::uint32_t refineSr44=0;if(!readPcm16Mono(refineStimulus,refineS44,refineSr44,error)){r.error=error;fs::remove_all(work,ec);return r;}
             std::vector<float> unusedInput,refineRendered;double refineRate=sr;if(!renderNam(modelPath,refineS44,trainer.blockSize,0.31f,unusedInput,refineRendered,refineRate,error,status)){r.error="Could not render refinement stimulus through NAM: "+error;fs::remove_all(work,ec);return r;}
             refineTarget44100=prepareToneTarget44100(refineRendered,refineRate);
+        }
+
+        fs::path toneMatchInputClo=original2048;
+        if(correction.enabled){
+            const double finalGain=correctiveStats.rmsGain*std::pow(10.0,correctiveStats.postGainDb/20.0);
+            report(status,L"Tone Match + Corrective IR: applying the same Corrective IR to the NAM target...");
+            refineTarget44100=applyCorrectiveIrToToneTarget(refineTarget44100,correctiveIr,finalGain);
+            toneMatchInputClo=corrected2048;
+            report(status,L"Tone Match: NAM + Corrective IR vs CLO + Corrective IR.");
+        }else if(!refine.referenceWav.empty()){
             report(status,L"Tone Match: same refinement stimulus through NAM Full vs original native CLO.");
-        }else report(status,L"Tone Match: original conversion stimulus through NAM Full vs original native CLO.");
+        }else{
+            report(status,L"Tone Match: original conversion stimulus through NAM Full vs original native CLO.");
+        }
+
         const fs::path targetWav=work/L"refine_nam_output.wav";if(!writeMonoFloat32Wav(targetWav,refineTarget44100,44100,error)){r.error=error;fs::remove_all(work,ec);return r;}
         toneMatched2048=work/L"native_2048_TONEMATCH.clo";
-        if(!refineCloBOnly(original2048,refineStimulus,targetWav,toneMatched2048,refine,error,status)){r.error=error.empty()?"CLO refinement failed.":error;fs::remove_all(work,ec);return r;}
-    }
-
-    fs::path sourceForOutput=original2048;
-    if(correction.enabled){
-        if(correction.wav.empty()){r.error="Select a Corrective IR WAV file.";fs::remove_all(work,ec);return r;}
-        report(status,L"Applying Corrective IR...");
-        const fs::path corrected=work/L"native_2048_corrected.clo";CorrectiveIrStats stats;
-        if(!applyCorrectiveIrToClo(original2048,correction.wav,corrected,stats,error)){r.error=error.empty()?"Corrective IR failed.":error;fs::remove_all(work,ec);return r;}
-        report(status,L"Corrective IR applied: linear convolution, RMS match, -6 dB post gain. RMS gain "+std::to_wstring(stats.rmsGainDb)+L" dB; total "+std::to_wstring(stats.totalGainDb)+L" dB.");
-        sourceForOutput=corrected;
+        CloRefineConfig refineRun=refine;
+        if(!refineCloBOnly(toneMatchInputClo,refineStimulus,targetWav,toneMatched2048,refineRun,error,status)){r.error=error.empty()?"CLO refinement failed.":error;fs::remove_all(work,ec);return r;}
     }
 
     if(refine.enabled){

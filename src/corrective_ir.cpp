@@ -259,6 +259,26 @@ double rms(const std::array<double, kBlockBCount>& values) {
 
 } // namespace
 
+bool loadCorrectiveIrSamples(const fs::path& correctiveWav,
+                             std::vector<float>& correctiveIr,
+                             std::string& error) {
+    std::vector<double> decoded;
+    if (!decodeCorrectiveIr(correctiveWav, decoded, error)) return false;
+    correctiveIr.clear();
+    correctiveIr.reserve(decoded.size());
+    for (const double sample : decoded) {
+        if (!std::isfinite(sample)
+            || sample > static_cast<double>(std::numeric_limits<float>::max())
+            || sample < -static_cast<double>(std::numeric_limits<float>::max())) {
+            error = "Corrective IR WAV contains an invalid sample.";
+            correctiveIr.clear();
+            return false;
+        }
+        correctiveIr.push_back(static_cast<float>(sample));
+    }
+    return true;
+}
+
 bool applyCorrectiveIrToClo(const fs::path& sourceClo,
                             const std::vector<float>& correctiveIr,
                             const fs::path& destinationClo,
@@ -370,19 +390,8 @@ bool applyCorrectiveIrToClo(const fs::path& sourceClo,
                             CorrectiveIrStats& stats,
                             std::string& error,
                             double postCorrectionDb) {
-    std::vector<double> decoded;
-    if (!decodeCorrectiveIr(correctiveWav, decoded, error)) return false;
     std::vector<float> ir;
-    ir.reserve(decoded.size());
-    for (const double sample : decoded) {
-        if (!std::isfinite(sample)
-            || sample > static_cast<double>(std::numeric_limits<float>::max())
-            || sample < -static_cast<double>(std::numeric_limits<float>::max())) {
-            error = "Corrective IR WAV contains an invalid sample.";
-            return false;
-        }
-        ir.push_back(static_cast<float>(sample));
-    }
+    if (!loadCorrectiveIrSamples(correctiveWav, ir, error)) return false;
     return applyCorrectiveIrToClo(sourceClo, ir, destinationClo, stats, error, postCorrectionDb);
 }
 

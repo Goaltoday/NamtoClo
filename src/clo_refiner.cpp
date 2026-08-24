@@ -19,6 +19,28 @@ constexpr std::uint32_t kSampleRate = 44100;
 constexpr std::size_t kCoeffBase = 0x88;
 constexpr std::size_t kPreferredFftSize = 32768;
 
+// Tone Match SOURCE must reproduce the same external GP-200 SnapTone wrapper
+// used by CloPlayer.  Gain is before the CLO core and therefore changes the
+// nonlinear excitation; Volume is after the CLO core.  CloPlayer defaults to
+// visible Gain=50 and Volume=50.
+constexpr float kToneMatchGainControl = 50.0f;
+constexpr float kToneMatchVolumeControl = 50.0f;
+
+float cloPlayerGainControlToLinear(float visibleControl) {
+    constexpr float uiToInternalSlope  = 0.69311597f;
+    constexpr float uiToInternalOffset = 25.201331f;
+    constexpr float firmwareOffset     = -3.986313819885254f;
+    constexpr float firmwareSlope      =  0.07972627133131027f;
+    const float internalGain = uiToInternalSlope * visibleControl + uiToInternalOffset;
+    return std::exp(firmwareOffset + internalGain * firmwareSlope);
+}
+
+float cloPlayerVolumeControlToLinear(float control) {
+    constexpr float offset = -3.986313819885254f;
+    constexpr float slope  =  0.07972627133131027f;
+    return std::exp(offset + control * slope);
+}
+
 std::uint16_t le16(const std::uint8_t* p) { return static_cast<std::uint16_t>(p[0] | (p[1] << 8)); }
 std::uint32_t le32(const std::uint8_t* p) { return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) | (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24); }
 float lef(const std::uint8_t* p) { auto u=le32(p); float v{}; std::memcpy(&v,&u,4); return v; }
@@ -91,9 +113,9 @@ bool parseModel(const std::vector<std::uint8_t>& d, Model& m, std::string& error
     m.A.resize(ca);m.B.resize(cb);for(std::size_t i=0;i<ca;++i)m.A[i]=lef(d.data()+kCoeffBase+4ull*(sa+i));for(std::size_t i=0;i<cb;++i)m.B[i]=lef(d.data()+kCoeffBase+4ull*(sb+i));return true;
 }
 
-std::vector<float> precomputeA(const Model& src,const std::vector<float>& in,std::size_t n){
+std::vector<float> precomputeA(const Model& src,const std::vector<float>& in,std::size_t n,float inputGain=1.0f){
     Model m=src; std::vector<float> hist(m.A.size(),0), out(n); std::size_t ix=0;
-    for(std::size_t i=0;i<n;++i){ float x=m.pre.process(in[i]); hist[ix]=x; double s=0;std::size_t h=ix;for(float t:m.A){s+=double(t)*hist[h];h=h? h-1:hist.size()-1;}ix=(ix+1)%hist.size();out[i]=float(s);}return out;
+    for(std::size_t i=0;i<n;++i){ float x=m.pre.process(in[i]*inputGain); hist[ix]=x; double s=0;std::size_t h=ix;for(float t:m.A){s+=double(t)*hist[h];h=h? h-1:hist.size()-1;}ix=(ix+1)%hist.size();out[i]=float(s);}return out;
 }
 
 
@@ -205,7 +227,6 @@ constexpr std::size_t kV26Fft=16384;
 constexpr std::size_t kV26Hop=4096;
 constexpr int kV26Groups=11;
 constexpr double kV26SilenceDb=-55.0;
-constexpr double kV26Clip=0.999;
 constexpr double kV26MinHz=30.0;
 constexpr double kV26MaxHz=20000.0;
 constexpr double kV26CmpMinHz=40.0;
@@ -227,7 +248,13 @@ static double v26interp(const std::vector<double>&f,const std::vector<double>&v,
 static V26Profile v26analyse(const std::vector<float>& s,double scale,std::size_t start,std::size_t count){
     V26Profile p;if(start>=s.size())return p;std::size_t end=std::min(s.size(),start+count);if(end-start<kV26Fft)return p;
     auto win=hannWindow(kV26Fft);std::array<std::vector<long double>,kV26Groups> sums;for(auto&g:sums)g.assign(kV26Fft/2+1,0);std::array<std::size_t,kV26Groups> counts{};std::vector<std::complex<float>> b(kV26Fft);double silence=std::pow(10.0,kV26SilenceDb/20.0);std::size_t accepted=0;
-    for(std::size_t pos=start;pos+kV26Fft<=end;pos+=kV26Hop){long double ss=0;bool clip=false;double mean=0;for(std::size_t i=0;i<kV26Fft;++i){double x=scale*s[pos+i];ss+=x*x;mean+=x;if(std::abs(x)>=kV26Clip)clip=true;}double rms=std::sqrt(static_cast<double>(ss/kV26Fft));if(rms<silence||clip)continue;mean/=kV26Fft;for(std::size_t i=0;i<kV26Fft;++i)b[i]={static_cast<float>((scale*s[pos+i]-mean)*win[i]),0};fft(b,false);auto gi=accepted%kV26Groups;for(std::size_t k=0;k<=kV26Fft/2;++k){double hz=double(k)*kSampleRate/kV26Fft;if(hz<kV26MinHz||hz>kV26MaxHz)continue;double mag=std::abs(b[k]);sums[gi][k]+=mag*mag;}++counts[gi];++accepted;}
+    // source/target are internal floating-point renders, not PCM files being
+    // inspected for hard digital clipping.  A valid NAM or CLO render can
+    // legitimately exceed +/-1.0.  Rejecting an entire FFT frame when just
+    // one sample crosses 0.999 caused active DI material (especially bass)
+    // to produce zero accepted frames and "Tone Match comparison invalid".
+    // Keep only the silence guard here.
+    for(std::size_t pos=start;pos+kV26Fft<=end;pos+=kV26Hop){long double ss=0;double mean=0;for(std::size_t i=0;i<kV26Fft;++i){double x=scale*s[pos+i];ss+=x*x;mean+=x;}double rms=std::sqrt(static_cast<double>(ss/kV26Fft));if(!std::isfinite(rms)||rms<silence)continue;mean/=kV26Fft;for(std::size_t i=0;i<kV26Fft;++i)b[i]={static_cast<float>((scale*s[pos+i]-mean)*win[i]),0};fft(b,false);auto gi=accepted%kV26Groups;for(std::size_t k=0;k<=kV26Fft/2;++k){double hz=double(k)*kSampleRate/kV26Fft;if(hz<kV26MinHz||hz>kV26MaxHz)continue;double mag=std::abs(b[k]);sums[gi][k]+=mag*mag;}++counts[gi];++accepted;}
     p.frames=accepted;if(!accepted)return p;std::size_t active=0;for(auto c:counts)if(c)++active;std::vector<double> spec(kV26Fft/2+1,kV26NegInf),dev(kV26Fft/2+1,0);double strongest=kV26NegInf;
     for(std::size_t k=0;k<=kV26Fft/2;++k){double hz=double(k)*kSampleRate/kV26Fft;if(hz<kV26MinHz||hz>kV26MaxHz)continue;std::vector<double> means;for(int g=0;g<kV26Groups;++g)if(counts[g]){double mp=static_cast<double>(sums[g][k]/counts[g]);means.push_back(10*std::log10(std::max(mp,1e-20)));}double med=v26median(means);spec[k]=med;dev[k]=kV26MadToSigma*v26mad(means,med);strongest=std::max(strongest,med);}
     std::size_t incl=0,confident=0;for(std::size_t k=0;k<=kV26Fft/2;++k){double hz=double(k)*kSampleRate/kV26Fft;if(hz<kV26MinHz||hz>kV26MaxHz)continue;double frameC=v26clamp(double(accepted)/32.0),groupC=v26clamp(double(active)/kV26Groups),energyC=v26clamp((spec[k]-strongest+60.0)/60.0),stable=1.0/(1.0+dev[k]/kV26ConfRefDb),c=v26clamp(frameC*groupC*energyC*stable);p.f.push_back(hz);p.db.push_back(spec[k]);p.conf.push_back(c);++incl;if(c>=.25)++confident;}if(incl)p.coverage=double(confident)/incl;return p;
@@ -236,7 +263,11 @@ static V26Comp v26compare(const V26Profile&s,const V26Profile&t){V26Comp c;if(!s
 static double v26SmoothWidth(double amount){struct P{double a,w;};static constexpr P p[]={{0,0},{.25,1.0/24},{.5,1.0/12},{.75,1.0/6},{1,1.0/3}};if(amount<=0)return 0;for(int i=1;i<5;++i)if(amount<=p[i].a){double q=(amount-p[i-1].a)/(p[i].a-p[i-1].a);return p[i-1].w+q*(p[i].w-p[i-1].w);}return p[4].w;}
 static std::vector<double> v26smooth(const V26Comp&c,double amount){std::vector<double> out(c.raw.size());if(amount<=0)return c.raw;double width=v26SmoothWidth(amount),sigma=std::max(width/2.354820045,1e-6),maxd=3*sigma;for(std::size_t i=0;i<c.raw.size();++i){double sw=0,sx=0;for(std::size_t j=0;j<c.raw.size();++j){double d=std::log2(c.f[j]/c.f[i]);if(std::abs(d)>maxd)continue;double w=std::exp(-.5*d*d/(sigma*sigma));sx+=w*c.raw[j];sw+=w;}out[i]=sw>1e-12?sx/sw:c.raw[i];}return out;}
 static std::vector<float> v26minPhaseIr(const V26Comp&c,double smooth){auto curve=v26smooth(c,smooth);const std::size_t N=4096;std::vector<std::complex<float>> logsp(N),cep(N),mc(N),cls(N),mps(N),imp(N);for(std::size_t k=0;k<=N/2;++k){double hz=double(k)*kSampleRate/N,db=v26interp(c.f,curve,hz),lm=db*0.11512925464970229;logsp[k]={float(lm),0};if(k>0&&k<N/2)logsp[N-k]={float(lm),0};}fft(logsp,true);cep=logsp;mc[0]=cep[0];for(std::size_t i=1;i<N/2;++i)mc[i]=cep[i]*2.0f;mc[N/2]=cep[N/2];fft(mc,false);cls=mc;for(std::size_t i=0;i<N;++i)mps[i]=std::exp(cls[i]);fft(mps,true);imp=mps;std::vector<float> ir(kV26IrLength);for(std::size_t i=0;i<ir.size();++i)ir[i]=imp[i].real();return ir;}
-static void renderWithB(const std::vector<float>& preB,const std::vector<float>& B,std::vector<float>& out){ FirFftPlan plan(B); plan.process(preB,out);}
+static void renderWithB(const std::vector<float>& preB,const std::vector<float>& B,std::vector<float>& out,float outputGain=1.0f){
+    FirFftPlan plan(B);
+    plan.process(preB,out);
+    if(outputGain!=1.0f) for(auto& x:out) x*=outputGain;
+}
 
 }
 
@@ -247,8 +278,6 @@ bool refineCloBOnly(const fs::path& inputClo2048,
                     const CloRefineConfig& config,
                     std::string& error,
                     const RefineStatusCallback& status) {
-    (void)config;
-
     std::vector<std::uint8_t> bytes;
     if (!readFileBytes(inputClo2048, bytes, error)) return false;
 
@@ -268,29 +297,36 @@ bool refineCloBOnly(const fs::path& inputClo2048,
         return false;
     }
 
-    if (status) status(L"Rendering CLO for Tone Match...");
-    auto aout = precomputeA(m, in, in.size());
+    if (status) status(L"Rendering CLO for Tone Match with CloPlayer Gain/Volume wrapper...");
+    const float inputGain = cloPlayerGainControlToLinear(kToneMatchGainControl);
+    const float outputGain = cloPlayerVolumeControlToLinear(kToneMatchVolumeControl);
+    auto aout = precomputeA(m, in, in.size(), inputGain);
     std::vector<float> preB, orig;
     renderPreB(m, aout, m.pp, m.pn, m.kp, m.kn, preB);
-    renderWithB(preB, m.B, orig);
+    renderWithB(preB, m.B, orig, outputGain);
 
     const std::size_t sourceStart = orig.size() - tailFrames;
     const std::size_t targetStart = target.size() - tailFrames;
     std::vector<float> sourceTail(orig.begin() + static_cast<std::ptrdiff_t>(sourceStart), orig.end());
     std::vector<float> targetTail(target.begin() + static_cast<std::ptrdiff_t>(targetStart), target.end());
 
-    const double fixedScale = fitScale(sourceTail, targetTail);
-    const auto sourceProfile = v26analyse(sourceTail, fixedScale, 0, tailFrames);
+    // Match the VST Tone Match behaviour: analyse SOURCE at its real level.
+    // Do not least-squares scale the CLO render toward TARGET before the
+    // spectral comparison, otherwise part of the level difference is removed
+    // before TARGET - SOURCE is calculated.
+    const auto sourceProfile = v26analyse(sourceTail, 1.0, 0, tailFrames);
     const auto targetProfile = v26analyse(targetTail, 1.0, 0, tailFrames);
     const auto comparison = v26compare(sourceProfile, targetProfile);
     if (!comparison.valid()) {
-        error = "Tone Match comparison invalid";
+        error = "Tone Match comparison invalid (accepted source frames: "
+              + std::to_string(sourceProfile.frames)
+              + ", target frames: " + std::to_string(targetProfile.frames) + ")";
         return false;
     }
 
     // Keep the established refinement DSP unchanged: 5% smoothing and a
-    // 2048-sample minimum-phase IR.  The IR is now passed in memory, so no
-    // diagnostic/intermediate WAV is written to disk.
+    // 2048-sample minimum-phase IR. The IR stays in memory and is applied
+    // directly to Block B; no diagnostic/intermediate WAV is written to disk.
     const auto ir = v26minPhaseIr(comparison, kV26Smooth);
 
     if (status) status(L"Applying Tone Match correction to Block B...");
