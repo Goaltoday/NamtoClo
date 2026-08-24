@@ -24,7 +24,7 @@
 
 namespace ntc::tone3000 {
 namespace {
-constexpr wchar_t kHost[] = L"tone3000.com";
+constexpr wchar_t kHost[] = L"www.tone3000.com";
 constexpr wchar_t kUserAgent[] = L"NamToClo-Tone3000/2.8";
 constexpr unsigned short kCallbackPort = 17836;
 constexpr char kRedirectUri[] = "http://127.0.0.1:17836/callback";
@@ -189,9 +189,16 @@ bool waitForCallback(std::string& target, std::string& error) {
 }
 
 std::wstring apiPathFromModelUrl(const std::string& url) {
-    const std::string base = "https://tone3000.com";
-    if (url.rfind(base, 0) == 0) return utf8ToWide(url.substr(base.size()));
-    return utf8ToWide(url);
+    // model_url is an absolute TONE3000 URL. The authenticated client must
+    // request only its path because http() already connects to T3K_API.
+    // Strip any http(s) host, matching the official reference client's
+    // `url.replace(/^https?:\/\/[^/]+/, '')` behaviour.
+    const auto scheme = url.find("://");
+    if (scheme != std::string::npos) {
+        const auto path = url.find('/', scheme + 3);
+        return utf8ToWide(path == std::string::npos ? std::string("/") : url.substr(path));
+    }
+    return utf8ToWide(url.empty() || url.front() == '/' ? url : "/" + url);
 }
 
 } // namespace
@@ -254,7 +261,7 @@ bool Client::ensureAccessToken(std::string& error) {
 
 bool Client::searchNamTones(const std::string& query, std::vector<Tone>& tones, std::string& error) {
     if (!ensureAccessToken(error)) return false;
-    const std::wstring path = utf8ToWide("/api/v1/tones/search?format=nam&page_size=30&sort=best-match&query=" + urlEncode(query));
+    const std::wstring path = utf8ToWide("/api/v1/tones/search?format=nam&architecture=2&page_size=100&sort=best-match&query=" + urlEncode(query));
     HttpResponse r; if (!http(L"GET", path, {}, {}, tokens_.accessToken, r, error)) return false;
     if (r.status == 401 && refresh(error)) return searchNamTones(query, tones, error);
     if (r.status < 200 || r.status >= 300) { error="Tone search failed: HTTP "+std::to_string(r.status); return false; }
@@ -267,7 +274,7 @@ bool Client::searchNamTones(const std::string& query, std::vector<Tone>& tones, 
 
 bool Client::listModels(std::int64_t toneId, std::vector<Model>& models, std::string& error) {
     if (!ensureAccessToken(error)) return false;
-    const std::wstring path=utf8ToWide("/api/v1/models?tone_id="+std::to_string(toneId)+"&page_size=100"); HttpResponse r;
+    const std::wstring path=utf8ToWide("/api/v1/models?tone_id="+std::to_string(toneId)+"&architecture=2&page_size=100"); HttpResponse r;
     if (!http(L"GET",path,{}, {},tokens_.accessToken,r,error)) return false;
     if (r.status<200||r.status>=300){error="Model list failed: HTTP "+std::to_string(r.status);return false;}
     try { auto j=nlohmann::json::parse(r.body); models.clear(); for(const auto& x:j.at("data")){ Model m; m.id=x.value("id",0LL);m.toneId=x.value("tone_id",0LL);m.name=x.value("name","");m.size=x.value("size","");m.architectureVersion=x.value("architecture_version","");m.modelUrl=x.value("model_url",""); if(m.modelUrl.size()>=4 && m.modelUrl.substr(m.modelUrl.size()-4)==".nam") models.push_back(std::move(m)); }} catch(const std::exception&e){error=std::string("Invalid models response: ")+e.what();return false;} return true;

@@ -349,7 +349,7 @@ void startT3kAuth(HWND hwnd) {
 
 void startT3kSearch(HWND hwnd) {
     if (gT3kBusy || !gT3kClient.connected()) return;
-    const auto q=utf8FromWide(getText(gT3kSearch)); setT3kBusy(true); setText(gT3kState,L"Searching NAM captures on Tone3000...");
+    const auto q=utf8FromWide(getText(gT3kSearch)); setT3kBusy(true); setText(gT3kState,L"Searching NAM A2 captures on Tone3000...");
     std::thread([hwnd,q]{ auto* m=new T3kSearchMessage; m->ok=gT3kClient.searchNamTones(q,m->tones,m->error); PostMessageW(hwnd,WM_APP_T3K_SEARCH_DONE,0,reinterpret_cast<LPARAM>(m)); }).detach();
 }
 
@@ -882,11 +882,11 @@ void layoutControls(HWND hwnd) {
     moveCtrl(gT3kSearch, ux, gUi.uploaderCard.top + 116, ur - ux - 136, 30);
     moveCtrl(gT3kSearchButton, ur - 124, gUi.uploaderCard.top + 112, 124, 34);
     moveCtrl(GetDlgItem(hwnd,1021), ux, gUi.uploaderCard.top + 158, 220, 24);
-    moveCtrl(gT3kResults, ux, gUi.uploaderCard.top + 184, ur - ux, 150);
-    moveCtrl(GetDlgItem(hwnd,1022), ux, gUi.uploaderCard.top + 346, 220, 24);
-    moveCtrl(gT3kModels, ux, gUi.uploaderCard.top + 372, ur - ux - 220, 250);
-    moveCtrl(gT3kUse, ur - 208, gUi.uploaderCard.top + 368, 208, 36);
-    moveCtrl(gT3kState, ux, gUi.uploaderCard.top + 416, ur - ux, 28);
+    moveCtrl(gT3kResults, ux, gUi.uploaderCard.top + 184, ur - ux, 142);
+    moveCtrl(GetDlgItem(hwnd,1022), ux, gUi.uploaderCard.top + 338, 220, 24);
+    moveCtrl(gT3kModels, ux, gUi.uploaderCard.top + 364, ur - ux - 220, 220);
+    moveCtrl(gT3kUse, ur - 208, gUi.uploaderCard.top + 360, 208, 36);
+    moveCtrl(gT3kState, ux, gUi.uploaderCard.top + 408, ur - ux, 24);
 
     moveCtrl(gUploaderCloEdit, ux, gUi.uploaderCard.top + 56, ur - ux - 136, 30);
     moveCtrl(gUploaderBrowseButton, ur - 124, gUi.uploaderCard.top + 52, 124, 34);
@@ -1021,7 +1021,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1019, L"Publishable API key");
     gT3kKey = CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|ES_AUTOHSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_KEY),nullptr,nullptr); applyFont(gT3kKey);
     gT3kConnect = CreateWindowW(L"BUTTON",L"Connect",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_CONNECT),nullptr,nullptr); applyFont(gT3kConnect);
-    createSectionLabel(hwnd, 1020, L"Search NAM captures");
+    createSectionLabel(hwnd, 1020, L"Search NAM captures (A2)");
     gT3kSearch = CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|ES_AUTOHSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_SEARCH),nullptr,nullptr); applyFont(gT3kSearch);
     gT3kSearchButton = CreateWindowW(L"BUTTON",L"Search",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_SEARCH_BUTTON),nullptr,nullptr); applyFont(gT3kSearchButton);
     createSectionLabel(hwnd, 1021, L"Results");
@@ -1409,7 +1409,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     case WM_APP_T3K_SEARCH_DONE: {
         std::unique_ptr<T3kSearchMessage> m(reinterpret_cast<T3kSearchMessage*>(lParam)); gT3kTones.clear(); gT3kModelItems.clear(); SendMessageW(gT3kResults,LB_RESETCONTENT,0,0); SendMessageW(gT3kModels,CB_RESETCONTENT,0,0);
-        if(m && m->ok){ gT3kTones=std::move(m->tones); for(const auto&t:gT3kTones){ std::wstring label=wideFromUtf8(t.title+" — "+t.creator+" ["+t.gear+"]"); SendMessageW(gT3kResults,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str())); } setText(gT3kState,L"Found "+std::to_wstring(gT3kTones.size())+L" NAM tones. Select one to load its models."); }
+        if(m && m->ok){ gT3kTones=std::move(m->tones); for(const auto&t:gT3kTones){ std::wstring label=wideFromUtf8(t.title+" — "+t.creator+" ["+t.gear+"]"); SendMessageW(gT3kResults,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str())); } setText(gT3kState,L"Found "+std::to_wstring(gT3kTones.size())+L" NAM A2 tones. Select one to load its models."); }
         else if(m) setText(gT3kState,L"Search failed: "+wideFromUtf8(m->error)); setT3kBusy(false); return 0;
     }
     case WM_APP_T3K_MODELS_DONE: {
