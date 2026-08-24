@@ -267,14 +267,20 @@ bool Client::ensureAccessToken(std::string& error) {
     return true;
 }
 
-bool Client::searchNamTones(const std::string& query, std::vector<Tone>& tones, std::string& error) {
+bool Client::searchNamTones(const std::string& query, int page, const std::string& sort, std::vector<Tone>& tones,
+                            int& totalPages, int& totalResults, std::string& error) {
     if (!ensureAccessToken(error)) return false;
-    const std::wstring path = utf8ToWide("/api/v1/tones/search?format=nam&architecture=2&page_size=100&sort=best-match&query=" + urlEncode(query));
+    if (page < 1) page = 1;
+    const std::wstring path = utf8ToWide("/api/v1/tones/search?format=nam&architecture=2&page_size=100&page=" +
+                                         std::to_string(page) + "&sort=" + urlEncode(sort.empty() ? "best-match" : sort) + "&query=" + urlEncode(query));
     HttpResponse r; if (!http(L"GET", path, {}, {}, tokens_.accessToken, r, error)) return false;
-    if (r.status == 401 && refresh(error)) return searchNamTones(query, tones, error);
+    if (r.status == 401 && refresh(error)) return searchNamTones(query, page, sort, tones, totalPages, totalResults, error);
     if (r.status < 200 || r.status >= 300) { error="Tone search failed: HTTP "+std::to_string(r.status); return false; }
     try {
         auto j=nlohmann::json::parse(r.body); tones.clear();
+        totalPages = j.value("total_pages", 1);
+        totalResults = j.value("total", 0);
+        if (totalPages < 1) totalPages = 1;
         for (const auto& x : j.at("data")) {
             Tone t;
             t.id = x.value("id", 0LL);

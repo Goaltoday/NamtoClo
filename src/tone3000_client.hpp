@@ -46,7 +46,8 @@ public:
     // verifies PKCE state and exchanges the authorization code for bearer tokens.
     bool authenticateInteractive(std::string& error);
 
-    bool searchNamTones(const std::string& query, std::vector<Tone>& tones, std::string& error);
+    bool searchNamTones(const std::string& query, int page, const std::string& sort, std::vector<Tone>& tones,
+                        int& totalPages, int& totalResults, std::string& error);
     bool listModels(std::int64_t toneId, std::vector<Model>& models, std::string& error);
     bool downloadModel(const Model& model, const std::filesystem::path& destination, std::string& error);
 
