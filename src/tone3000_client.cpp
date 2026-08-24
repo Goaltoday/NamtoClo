@@ -34,6 +34,14 @@ std::int64_t nowMs() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
+
+std::string jsonStringOrEmpty(const nlohmann::json& object, const char* key) {
+    const auto it = object.find(key);
+    if (it == object.end() || it->is_null()) return {};
+    if (it->is_string()) return it->get<std::string>();
+    return {};
+}
+
 std::wstring utf8ToWide(const std::string& s) {
     if (s.empty()) return {};
     const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
@@ -267,7 +275,19 @@ bool Client::searchNamTones(const std::string& query, std::vector<Tone>& tones, 
     if (r.status < 200 || r.status >= 300) { error="Tone search failed: HTTP "+std::to_string(r.status); return false; }
     try {
         auto j=nlohmann::json::parse(r.body); tones.clear();
-        for (const auto& x : j.at("data")) { Tone t; t.id=x.value("id",0LL); t.title=x.value("title",""); t.gear=x.value("gear",""); t.license=x.value("license",""); t.modelsCount=x.value("models_count",0); t.downloadsCount=x.value("downloads_count",0); t.favoritesCount=x.value("favorites_count",0); if (x.contains("user")) t.creator=x["user"].value("username",""); tones.push_back(std::move(t)); }
+        for (const auto& x : j.at("data")) {
+            Tone t;
+            t.id = x.value("id", 0LL);
+            t.title = jsonStringOrEmpty(x, "title");
+            t.gear = jsonStringOrEmpty(x, "gear");
+            t.license = jsonStringOrEmpty(x, "license");
+            t.modelsCount = x.value("models_count", 0);
+            t.downloadsCount = x.value("downloads_count", 0);
+            t.favoritesCount = x.value("favorites_count", 0);
+            const auto userIt = x.find("user");
+            if (userIt != x.end() && userIt->is_object()) t.creator = jsonStringOrEmpty(*userIt, "username");
+            tones.push_back(std::move(t));
+        }
     } catch (const std::exception& e) { error=std::string("Invalid search response: ")+e.what(); return false; }
     return true;
 }
@@ -277,7 +297,26 @@ bool Client::listModels(std::int64_t toneId, std::vector<Model>& models, std::st
     const std::wstring path=utf8ToWide("/api/v1/models?tone_id="+std::to_string(toneId)+"&architecture=2&page_size=100"); HttpResponse r;
     if (!http(L"GET",path,{}, {},tokens_.accessToken,r,error)) return false;
     if (r.status<200||r.status>=300){error="Model list failed: HTTP "+std::to_string(r.status);return false;}
-    try { auto j=nlohmann::json::parse(r.body); models.clear(); for(const auto& x:j.at("data")){ Model m; m.id=x.value("id",0LL);m.toneId=x.value("tone_id",0LL);m.name=x.value("name","");m.size=x.value("size","");m.architectureVersion=x.value("architecture_version","");m.modelUrl=x.value("model_url",""); if(m.modelUrl.size()>=4 && m.modelUrl.substr(m.modelUrl.size()-4)==".nam") models.push_back(std::move(m)); }} catch(const std::exception&e){error=std::string("Invalid models response: ")+e.what();return false;} return true;
+    try {
+        auto j = nlohmann::json::parse(r.body);
+        models.clear();
+        for (const auto& x : j.at("data")) {
+            Model m;
+            m.id = x.value("id", 0LL);
+            m.toneId = x.value("tone_id", 0LL);
+            m.name = jsonStringOrEmpty(x, "name");
+            m.size = jsonStringOrEmpty(x, "size");
+            m.architectureVersion = jsonStringOrEmpty(x, "architecture_version");
+            m.modelUrl = jsonStringOrEmpty(x, "model_url");
+            if (m.modelUrl.size() >= 4 && m.modelUrl.substr(m.modelUrl.size() - 4) == ".nam") {
+                models.push_back(std::move(m));
+            }
+        }
+    } catch (const std::exception& e) {
+        error = std::string("Invalid models response: ") + e.what();
+        return false;
+    }
+    return true;
 }
 
 bool Client::downloadModel(const Model& model, const std::filesystem::path& destination, std::string& error) {
