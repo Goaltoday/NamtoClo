@@ -19,6 +19,28 @@ constexpr std::uint32_t kSampleRate = 44100;
 constexpr std::size_t kCoeffBase = 0x88;
 constexpr std::size_t kPreferredFftSize = 32768;
 
+// Tone Match SOURCE must reproduce the same external GP-200 SnapTone wrapper
+// used by CloPlayer.  Gain is before the CLO core and therefore changes the
+// nonlinear excitation; Volume is after the CLO core.  CloPlayer defaults to
+// visible Gain=50 and Volume=50.
+constexpr float kToneMatchGainControl = 50.0f;
+constexpr float kToneMatchVolumeControl = 50.0f;
+
+float cloPlayerGainControlToLinear(float visibleControl) {
+    constexpr float uiToInternalSlope  = 0.69311597f;
+    constexpr float uiToInternalOffset = 25.201331f;
+    constexpr float firmwareOffset     = -3.986313819885254f;
+    constexpr float firmwareSlope      =  0.07972627133131027f;
+    const float internalGain = uiToInternalSlope * visibleControl + uiToInternalOffset;
+    return std::exp(firmwareOffset + internalGain * firmwareSlope);
+}
+
+float cloPlayerVolumeControlToLinear(float control) {
+    constexpr float offset = -3.986313819885254f;
+    constexpr float slope  =  0.07972627133131027f;
+    return std::exp(offset + control * slope);
+}
+
 std::uint16_t le16(const std::uint8_t* p) { return static_cast<std::uint16_t>(p[0] | (p[1] << 8)); }
 std::uint32_t le32(const std::uint8_t* p) { return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) | (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24); }
 float lef(const std::uint8_t* p) { auto u=le32(p); float v{}; std::memcpy(&v,&u,4); return v; }
@@ -111,9 +133,9 @@ bool parseModel(const std::vector<std::uint8_t>& d, Model& m, std::string& error
     m.A.resize(ca);m.B.resize(cb);for(std::size_t i=0;i<ca;++i)m.A[i]=lef(d.data()+kCoeffBase+4ull*(sa+i));for(std::size_t i=0;i<cb;++i)m.B[i]=lef(d.data()+kCoeffBase+4ull*(sb+i));return true;
 }
 
-std::vector<float> precomputeA(const Model& src,const std::vector<float>& in,std::size_t n){
+std::vector<float> precomputeA(const Model& src,const std::vector<float>& in,std::size_t n,float inputGain=1.0f){
     Model m=src; std::vector<float> hist(m.A.size(),0), out(n); std::size_t ix=0;
-    for(std::size_t i=0;i<n;++i){ float x=m.pre.process(in[i]); hist[ix]=x; double s=0;std::size_t h=ix;for(float t:m.A){s+=double(t)*hist[h];h=h? h-1:hist.size()-1;}ix=(ix+1)%hist.size();out[i]=float(s);}return out;
+    for(std::size_t i=0;i<n;++i){ float x=m.pre.process(in[i]*inputGain); hist[ix]=x; double s=0;std::size_t h=ix;for(float t:m.A){s+=double(t)*hist[h];h=h? h-1:hist.size()-1;}ix=(ix+1)%hist.size();out[i]=float(s);}return out;
 }
 
 
@@ -261,7 +283,11 @@ static V26Comp v26compare(const V26Profile&s,const V26Profile&t){V26Comp c;if(!s
 static double v26SmoothWidth(double amount){struct P{double a,w;};static constexpr P p[]={{0,0},{.25,1.0/24},{.5,1.0/12},{.75,1.0/6},{1,1.0/3}};if(amount<=0)return 0;for(int i=1;i<5;++i)if(amount<=p[i].a){double q=(amount-p[i-1].a)/(p[i].a-p[i-1].a);return p[i-1].w+q*(p[i].w-p[i-1].w);}return p[4].w;}
 static std::vector<double> v26smooth(const V26Comp&c,double amount){std::vector<double> out(c.raw.size());if(amount<=0)return c.raw;double width=v26SmoothWidth(amount),sigma=std::max(width/2.354820045,1e-6),maxd=3*sigma;for(std::size_t i=0;i<c.raw.size();++i){double sw=0,sx=0;for(std::size_t j=0;j<c.raw.size();++j){double d=std::log2(c.f[j]/c.f[i]);if(std::abs(d)>maxd)continue;double w=std::exp(-.5*d*d/(sigma*sigma));sx+=w*c.raw[j];sw+=w;}out[i]=sw>1e-12?sx/sw:c.raw[i];}return out;}
 static std::vector<float> v26minPhaseIr(const V26Comp&c,double smooth){auto curve=v26smooth(c,smooth);const std::size_t N=4096;std::vector<std::complex<float>> logsp(N),cep(N),mc(N),cls(N),mps(N),imp(N);for(std::size_t k=0;k<=N/2;++k){double hz=double(k)*kSampleRate/N,db=v26interp(c.f,curve,hz),lm=db*0.11512925464970229;logsp[k]={float(lm),0};if(k>0&&k<N/2)logsp[N-k]={float(lm),0};}fft(logsp,true);cep=logsp;mc[0]=cep[0];for(std::size_t i=1;i<N/2;++i)mc[i]=cep[i]*2.0f;mc[N/2]=cep[N/2];fft(mc,false);cls=mc;for(std::size_t i=0;i<N;++i)mps[i]=std::exp(cls[i]);fft(mps,true);imp=mps;std::vector<float> ir(kV26IrLength);for(std::size_t i=0;i<ir.size();++i)ir[i]=imp[i].real();return ir;}
-static void renderWithB(const std::vector<float>& preB,const std::vector<float>& B,std::vector<float>& out){ FirFftPlan plan(B); plan.process(preB,out);}
+static void renderWithB(const std::vector<float>& preB,const std::vector<float>& B,std::vector<float>& out,float outputGain=1.0f){
+    FirFftPlan plan(B);
+    plan.process(preB,out);
+    if(outputGain!=1.0f) for(auto& x:out) x*=outputGain;
+}
 
 }
 
@@ -291,11 +317,13 @@ bool refineCloBOnly(const fs::path& inputClo2048,
         return false;
     }
 
-    if (status) status(L"Rendering CLO for Tone Match...");
-    auto aout = precomputeA(m, in, in.size());
+    if (status) status(L"Rendering CLO for Tone Match with CloPlayer Gain/Volume wrapper...");
+    const float inputGain = cloPlayerGainControlToLinear(kToneMatchGainControl);
+    const float outputGain = cloPlayerVolumeControlToLinear(kToneMatchVolumeControl);
+    auto aout = precomputeA(m, in, in.size(), inputGain);
     std::vector<float> preB, orig;
     renderPreB(m, aout, m.pp, m.pn, m.kp, m.kn, preB);
-    renderWithB(preB, m.B, orig);
+    renderWithB(preB, m.B, orig, outputGain);
 
     const std::size_t sourceStart = orig.size() - tailFrames;
     const std::size_t targetStart = target.size() - tailFrames;
