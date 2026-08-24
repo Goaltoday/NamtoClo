@@ -205,7 +205,6 @@ constexpr std::size_t kV26Fft=16384;
 constexpr std::size_t kV26Hop=4096;
 constexpr int kV26Groups=11;
 constexpr double kV26SilenceDb=-55.0;
-constexpr double kV26Clip=0.999;
 constexpr double kV26MinHz=30.0;
 constexpr double kV26MaxHz=20000.0;
 constexpr double kV26CmpMinHz=40.0;
@@ -227,7 +226,13 @@ static double v26interp(const std::vector<double>&f,const std::vector<double>&v,
 static V26Profile v26analyse(const std::vector<float>& s,double scale,std::size_t start,std::size_t count){
     V26Profile p;if(start>=s.size())return p;std::size_t end=std::min(s.size(),start+count);if(end-start<kV26Fft)return p;
     auto win=hannWindow(kV26Fft);std::array<std::vector<long double>,kV26Groups> sums;for(auto&g:sums)g.assign(kV26Fft/2+1,0);std::array<std::size_t,kV26Groups> counts{};std::vector<std::complex<float>> b(kV26Fft);double silence=std::pow(10.0,kV26SilenceDb/20.0);std::size_t accepted=0;
-    for(std::size_t pos=start;pos+kV26Fft<=end;pos+=kV26Hop){long double ss=0;bool clip=false;double mean=0;for(std::size_t i=0;i<kV26Fft;++i){double x=scale*s[pos+i];ss+=x*x;mean+=x;if(std::abs(x)>=kV26Clip)clip=true;}double rms=std::sqrt(static_cast<double>(ss/kV26Fft));if(rms<silence||clip)continue;mean/=kV26Fft;for(std::size_t i=0;i<kV26Fft;++i)b[i]={static_cast<float>((scale*s[pos+i]-mean)*win[i]),0};fft(b,false);auto gi=accepted%kV26Groups;for(std::size_t k=0;k<=kV26Fft/2;++k){double hz=double(k)*kSampleRate/kV26Fft;if(hz<kV26MinHz||hz>kV26MaxHz)continue;double mag=std::abs(b[k]);sums[gi][k]+=mag*mag;}++counts[gi];++accepted;}
+    // source/target are internal floating-point renders, not PCM files being
+    // inspected for hard digital clipping.  A valid NAM or CLO render can
+    // legitimately exceed +/-1.0.  Rejecting an entire FFT frame when just
+    // one sample crosses 0.999 caused active DI material (especially bass)
+    // to produce zero accepted frames and "Tone Match comparison invalid".
+    // Keep only the silence guard here.
+    for(std::size_t pos=start;pos+kV26Fft<=end;pos+=kV26Hop){long double ss=0;double mean=0;for(std::size_t i=0;i<kV26Fft;++i){double x=scale*s[pos+i];ss+=x*x;mean+=x;}double rms=std::sqrt(static_cast<double>(ss/kV26Fft));if(!std::isfinite(rms)||rms<silence)continue;mean/=kV26Fft;for(std::size_t i=0;i<kV26Fft;++i)b[i]={static_cast<float>((scale*s[pos+i]-mean)*win[i]),0};fft(b,false);auto gi=accepted%kV26Groups;for(std::size_t k=0;k<=kV26Fft/2;++k){double hz=double(k)*kSampleRate/kV26Fft;if(hz<kV26MinHz||hz>kV26MaxHz)continue;double mag=std::abs(b[k]);sums[gi][k]+=mag*mag;}++counts[gi];++accepted;}
     p.frames=accepted;if(!accepted)return p;std::size_t active=0;for(auto c:counts)if(c)++active;std::vector<double> spec(kV26Fft/2+1,kV26NegInf),dev(kV26Fft/2+1,0);double strongest=kV26NegInf;
     for(std::size_t k=0;k<=kV26Fft/2;++k){double hz=double(k)*kSampleRate/kV26Fft;if(hz<kV26MinHz||hz>kV26MaxHz)continue;std::vector<double> means;for(int g=0;g<kV26Groups;++g)if(counts[g]){double mp=static_cast<double>(sums[g][k]/counts[g]);means.push_back(10*std::log10(std::max(mp,1e-20)));}double med=v26median(means);spec[k]=med;dev[k]=kV26MadToSigma*v26mad(means,med);strongest=std::max(strongest,med);}
     std::size_t incl=0,confident=0;for(std::size_t k=0;k<=kV26Fft/2;++k){double hz=double(k)*kSampleRate/kV26Fft;if(hz<kV26MinHz||hz>kV26MaxHz)continue;double frameC=v26clamp(double(accepted)/32.0),groupC=v26clamp(double(active)/kV26Groups),energyC=v26clamp((spec[k]-strongest+60.0)/60.0),stable=1.0/(1.0+dev[k]/kV26ConfRefDb),c=v26clamp(frameC*groupC*energyC*stable);p.f.push_back(hz);p.db.push_back(spec[k]);p.conf.push_back(c);++incl;if(c>=.25)++confident;}if(incl)p.coverage=double(confident)/incl;return p;
@@ -284,7 +289,9 @@ bool refineCloBOnly(const fs::path& inputClo2048,
     const auto targetProfile = v26analyse(targetTail, 1.0, 0, tailFrames);
     const auto comparison = v26compare(sourceProfile, targetProfile);
     if (!comparison.valid()) {
-        error = "Tone Match comparison invalid";
+        error = "Tone Match comparison invalid (accepted source frames: "
+              + std::to_string(sourceProfile.frames)
+              + ", target frames: " + std::to_string(targetProfile.frames) + ")";
         return false;
     }
 
