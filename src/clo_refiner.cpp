@@ -284,8 +284,11 @@ bool refineCloBOnly(const fs::path& inputClo2048,
     std::vector<float> sourceTail(orig.begin() + static_cast<std::ptrdiff_t>(sourceStart), orig.end());
     std::vector<float> targetTail(target.begin() + static_cast<std::ptrdiff_t>(targetStart), target.end());
 
-    const double fixedScale = fitScale(sourceTail, targetTail);
-    const auto sourceProfile = v26analyse(sourceTail, fixedScale, 0, tailFrames);
+    // Match the VST Tone Match behaviour: analyse SOURCE at its real level.
+    // Do not least-squares scale the CLO render toward TARGET before the
+    // spectral comparison, otherwise part of the level difference is removed
+    // before TARGET - SOURCE is calculated.
+    const auto sourceProfile = v26analyse(sourceTail, 1.0, 0, tailFrames);
     const auto targetProfile = v26analyse(targetTail, 1.0, 0, tailFrames);
     const auto comparison = v26compare(sourceProfile, targetProfile);
     if (!comparison.valid()) {
