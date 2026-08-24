@@ -2,6 +2,7 @@
 #include "common.hpp"
 #include "gp200_midi.hpp"
 #include "gp5_midi.hpp"
+#include "tone3000_client.hpp"
 #include "resource.h"
 
 #include <windows.h>
@@ -15,6 +16,8 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
+#include <mutex>
 
 namespace fs = std::filesystem;
 
@@ -27,6 +30,10 @@ constexpr UINT WM_APP_UPLOAD_PROGRESS = WM_APP + 4;
 constexpr UINT WM_APP_UPLOAD_DONE = WM_APP + 5;
 constexpr UINT WM_APP_GP5_UPLOAD_PROGRESS = WM_APP + 6;
 constexpr UINT WM_APP_GP5_UPLOAD_DONE = WM_APP + 7;
+constexpr UINT WM_APP_T3K_AUTH_DONE = WM_APP + 8;
+constexpr UINT WM_APP_T3K_SEARCH_DONE = WM_APP + 9;
+constexpr UINT WM_APP_T3K_MODELS_DONE = WM_APP + 10;
+constexpr UINT WM_APP_T3K_DOWNLOAD_DONE = WM_APP + 11;
 constexpr int IDC_INPUT_PATH = 101;
 constexpr int IDC_LOAD_FILE = 102;
 constexpr int IDC_LOAD_FOLDER = 103;
@@ -62,6 +69,14 @@ constexpr int IDC_GP5_RESCAN = 135;
 constexpr int IDC_GP5_UPLOAD = 136;
 constexpr int IDC_GP5_DEVICE = 137;
 constexpr int IDC_GP5_PROGRESS = 138;
+constexpr int IDC_T3K_KEY = 139;
+constexpr int IDC_T3K_CONNECT = 140;
+constexpr int IDC_T3K_SEARCH = 141;
+constexpr int IDC_T3K_SEARCH_BUTTON = 142;
+constexpr int IDC_T3K_RESULTS = 143;
+constexpr int IDC_T3K_MODELS = 144;
+constexpr int IDC_T3K_USE = 145;
+constexpr int IDC_T3K_STATE = 146;
 
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
@@ -106,6 +121,18 @@ HWND gGp5RescanButton = nullptr;
 HWND gGp5UploadButton = nullptr;
 HWND gGp5Device = nullptr;
 HWND gGp5Progress = nullptr;
+HWND gT3kKey = nullptr;
+HWND gT3kConnect = nullptr;
+HWND gT3kSearch = nullptr;
+HWND gT3kSearchButton = nullptr;
+HWND gT3kResults = nullptr;
+HWND gT3kModels = nullptr;
+HWND gT3kUse = nullptr;
+HWND gT3kState = nullptr;
+ntc::tone3000::Client gT3kClient;
+std::vector<ntc::tone3000::Tone> gT3kTones;
+std::vector<ntc::tone3000::Model> gT3kModelItems;
+bool gT3kBusy = false;
 HWND gInputEdit = nullptr;
 HWND gOutEdit = nullptr;
 HWND gLoadFileButton = nullptr;
@@ -227,11 +254,11 @@ void applyFont(HWND h, HFONT font) {
 void applyFont(HWND h) { applyFont(h, gFont); }
 
 bool gp200UploaderTabSelected() {
-    return gBackendTabs && TabCtrl_GetCurSel(gBackendTabs) == 1;
+    return gBackendTabs && TabCtrl_GetCurSel(gBackendTabs) == 2;
 }
 
 bool gp5UploaderTabSelected() {
-    return gBackendTabs && TabCtrl_GetCurSel(gBackendTabs) == 2;
+    return gBackendTabs && TabCtrl_GetCurSel(gBackendTabs) == 3;
 }
 
 void showControl(HWND h, bool show) {
@@ -270,6 +297,81 @@ void showGp5UploaderUi(HWND hwnd, bool show) {
         showControl(GetDlgItem(hwnd, id), show);
 }
 
+bool tone3000TabSelected() {
+    return gBackendTabs && TabCtrl_GetCurSel(gBackendTabs) == 1;
+}
+
+void showTone3000Ui(HWND hwnd, bool show) {
+    const HWND controls[] = { gT3kKey, gT3kConnect, gT3kSearch, gT3kSearchButton,
+        gT3kResults, gT3kModels, gT3kUse, gT3kState };
+    for (HWND h : controls) showControl(h, show);
+    for (int id : {1019,1020,1021,1022}) showControl(GetDlgItem(hwnd, id), show);
+}
+
+struct T3kResultMessage { bool ok=false; std::string error; };
+struct T3kSearchMessage { bool ok=false; std::string error; std::vector<ntc::tone3000::Tone> tones; };
+struct T3kModelsMessage { bool ok=false; std::string error; std::vector<ntc::tone3000::Model> models; };
+struct T3kDownloadMessage { bool ok=false; std::string error; fs::path path; };
+
+std::string utf8FromWide(const std::wstring& s) {
+    if (s.empty()) return {};
+    int n=WideCharToMultiByte(CP_UTF8,0,s.data(),static_cast<int>(s.size()),nullptr,0,nullptr,nullptr);
+    std::string out(static_cast<size_t>(n),'\0');
+    WideCharToMultiByte(CP_UTF8,0,s.data(),static_cast<int>(s.size()),out.data(),n,nullptr,nullptr);
+    return out;
+}
+std::wstring wideFromUtf8(const std::string& s) {
+    if (s.empty()) return {};
+    int n=MultiByteToWideChar(CP_UTF8,0,s.data(),static_cast<int>(s.size()),nullptr,0);
+    std::wstring out(static_cast<size_t>(n),L'\0');
+    MultiByteToWideChar(CP_UTF8,0,s.data(),static_cast<int>(s.size()),out.data(),n);
+    return out;
+}
+
+void setT3kBusy(bool busy) {
+    gT3kBusy=busy;
+    EnableWindow(gT3kKey,!busy);
+    EnableWindow(gT3kConnect,!busy);
+    EnableWindow(gT3kSearch,!busy && gT3kClient.connected());
+    EnableWindow(gT3kSearchButton,!busy && gT3kClient.connected());
+    EnableWindow(gT3kResults,!busy && gT3kClient.connected());
+    EnableWindow(gT3kModels,!busy && !gT3kModelItems.empty());
+    EnableWindow(gT3kUse,!busy && !gT3kModelItems.empty());
+}
+
+void startT3kAuth(HWND hwnd) {
+    if (gT3kBusy) return;
+    const auto key=utf8FromWide(getText(gT3kKey));
+    gT3kClient.setPublishableKey(key);
+    setT3kBusy(true); setText(gT3kState,L"Opening Tone3000 authorization in your browser...");
+    std::thread([hwnd]{ auto* m=new T3kResultMessage; m->ok=gT3kClient.authenticateInteractive(m->error); PostMessageW(hwnd,WM_APP_T3K_AUTH_DONE,0,reinterpret_cast<LPARAM>(m)); }).detach();
+}
+
+void startT3kSearch(HWND hwnd) {
+    if (gT3kBusy || !gT3kClient.connected()) return;
+    const auto q=utf8FromWide(getText(gT3kSearch)); setT3kBusy(true); setText(gT3kState,L"Searching NAM captures on Tone3000...");
+    std::thread([hwnd,q]{ auto* m=new T3kSearchMessage; m->ok=gT3kClient.searchNamTones(q,m->tones,m->error); PostMessageW(hwnd,WM_APP_T3K_SEARCH_DONE,0,reinterpret_cast<LPARAM>(m)); }).detach();
+}
+
+void startT3kModels(HWND hwnd) {
+    if (gT3kBusy) return;
+    int sel=static_cast<int>(SendMessageW(gT3kResults,LB_GETCURSEL,0,0));
+    if(sel<0 || sel>=static_cast<int>(gT3kTones.size())) return;
+    auto id=gT3kTones[static_cast<size_t>(sel)].id; setT3kBusy(true); setText(gT3kState,L"Loading models for selected tone...");
+    std::thread([hwnd,id]{ auto* m=new T3kModelsMessage; m->ok=gT3kClient.listModels(id,m->models,m->error); PostMessageW(hwnd,WM_APP_T3K_MODELS_DONE,0,reinterpret_cast<LPARAM>(m)); }).detach();
+}
+
+void startT3kDownload(HWND hwnd) {
+    if(gT3kBusy) return;
+    int sel=static_cast<int>(SendMessageW(gT3kModels,CB_GETCURSEL,0,0)); if(sel<0||sel>=static_cast<int>(gT3kModelItems.size())) return;
+    const auto model=gT3kModelItems[static_cast<size_t>(sel)];
+    wchar_t local[MAX_PATH]{}; SHGetFolderPathW(nullptr,CSIDL_LOCAL_APPDATA,nullptr,SHGFP_TYPE_CURRENT,local);
+    fs::path dir=fs::path(local)/L"NamToClo"/L"Tone3000"/L"models";
+    fs::path dest=dir/(std::to_wstring(model.id)+L".nam");
+    setT3kBusy(true); setText(gT3kState,L"Downloading selected NAM...");
+    std::thread([hwnd,model,dest]{ auto* m=new T3kDownloadMessage; m->path=dest; m->ok=gT3kClient.downloadModel(model,dest,m->error); PostMessageW(hwnd,WM_APP_T3K_DOWNLOAD_DONE,0,reinterpret_cast<LPARAM>(m)); }).detach();
+}
+
 void refreshUploaderDetection() {
     const auto d = ntc::gp200::detectGp200Midi();
     setText(gUploaderDevice, ntc::gp200::describeDetection(d));
@@ -287,12 +389,18 @@ void refreshGp5Detection() {
 void updateBackendUi() {
     HWND hwnd = gBackendTabs ? GetParent(gBackendTabs) : nullptr;
     const int selected = gBackendTabs ? TabCtrl_GetCurSel(gBackendTabs) : 0;
-    const bool gp200 = selected == 1;
-    const bool gp5 = selected == 2;
+    const bool t3k = selected == 1;
+    const bool gp200 = selected == 2;
+    const bool gp5 = selected == 3;
     showConversionUi(hwnd, selected == 0);
+    showTone3000Ui(hwnd, t3k);
     showUploaderUi(hwnd, gp200);
     showGp5UploaderUi(hwnd, gp5);
-    if (gp200) {
+    if (t3k) {
+        setText(gSubtitle, L"Browse NAM captures on Tone3000 and load a model directly into the converter.");
+        setText(gStatus, gT3kClient.connected() ? L"Tone3000 connected." : L"Enter your Tone3000 publishable API key and connect.");
+        setT3kBusy(gT3kBusy);
+    } else if (gp200) {
         setText(gSubtitle, L"Upload CLO files directly to a GP-200 SnapTone slot via USB MIDI.");
         refreshUploaderDetection();
         if (!gUploadBusy) setText(gStatus, L"GP-200 Uploader ready.");
@@ -707,7 +815,7 @@ void computeLayout(int clientW, int clientH) {
     gUi.footer = RECT{ 0, clientH - footerH, clientW, clientH };
     gUi.infoBox = RECT{ gUi.sectionRecorded.left + 108, gUi.sectionRecorded.top + 62,
                         gUi.sectionRecorded.right - 16, gUi.sectionRecorded.top + 96 };
-    gUi.uploaderCard = RECT{ margin, 145, clientW - margin, 535 };
+    gUi.uploaderCard = RECT{ margin, 145, clientW - margin, 615 };
 }
 
 void layoutControls(HWND hwnd) {
@@ -767,6 +875,19 @@ void layoutControls(HWND hwnd) {
     const int ux = gUi.uploaderCard.left + 34;
     const int ur = gUi.uploaderCard.right - 34;
     moveCtrl(GetDlgItem(hwnd, 1011), ux, gUi.uploaderCard.top + 28, 220, 22);
+    moveCtrl(GetDlgItem(hwnd,1019), ux, gUi.uploaderCard.top + 18, 220, 24);
+    moveCtrl(gT3kKey, ux, gUi.uploaderCard.top + 46, ur - ux - 136, 30);
+    moveCtrl(gT3kConnect, ur - 124, gUi.uploaderCard.top + 42, 124, 34);
+    moveCtrl(GetDlgItem(hwnd,1020), ux, gUi.uploaderCard.top + 88, 220, 24);
+    moveCtrl(gT3kSearch, ux, gUi.uploaderCard.top + 116, ur - ux - 136, 30);
+    moveCtrl(gT3kSearchButton, ur - 124, gUi.uploaderCard.top + 112, 124, 34);
+    moveCtrl(GetDlgItem(hwnd,1021), ux, gUi.uploaderCard.top + 158, 220, 24);
+    moveCtrl(gT3kResults, ux, gUi.uploaderCard.top + 184, ur - ux, 150);
+    moveCtrl(GetDlgItem(hwnd,1022), ux, gUi.uploaderCard.top + 346, 220, 24);
+    moveCtrl(gT3kModels, ux, gUi.uploaderCard.top + 372, ur - ux - 220, 250);
+    moveCtrl(gT3kUse, ur - 208, gUi.uploaderCard.top + 368, 208, 36);
+    moveCtrl(gT3kState, ux, gUi.uploaderCard.top + 416, ur - ux, 28);
+
     moveCtrl(gUploaderCloEdit, ux, gUi.uploaderCard.top + 56, ur - ux - 136, 30);
     moveCtrl(gUploaderBrowseButton, ur - 124, gUi.uploaderCard.top + 52, 124, 34);
     moveCtrl(GetDlgItem(hwnd, 1012), ux, gUi.uploaderCard.top + 112, 220, 22);
@@ -822,10 +943,12 @@ void createUi(HWND hwnd) {
     tab.mask = TCIF_TEXT;
     tab.pszText = const_cast<LPWSTR>(L"Convert to CLO");
     TabCtrl_InsertItem(gBackendTabs, 0, &tab);
-    tab.pszText = const_cast<LPWSTR>(L"GP-200 Uploader");
+    tab.pszText = const_cast<LPWSTR>(L"Tone3000");
     TabCtrl_InsertItem(gBackendTabs, 1, &tab);
-    tab.pszText = const_cast<LPWSTR>(L"GP-5 Uploader");
+    tab.pszText = const_cast<LPWSTR>(L"GP-200 Uploader");
     TabCtrl_InsertItem(gBackendTabs, 2, &tab);
+    tab.pszText = const_cast<LPWSTR>(L"GP-5 Uploader");
+    TabCtrl_InsertItem(gBackendTabs, 3, &tab);
     TabCtrl_SetCurSel(gBackendTabs, 0);
 
     createSectionLabel(hwnd, 1002, L"Input NAM or folder");
@@ -894,6 +1017,19 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1012, L"Destination SnapTone slot");
     createSectionLabel(hwnd, 1013, L"USB MIDI device");
     createSectionLabel(hwnd, 1014, L"Transfer progress");
+
+    createSectionLabel(hwnd, L"Publishable API key", 1019);
+    gT3kKey = CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|ES_AUTOHSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_KEY),nullptr,nullptr); applyFont(gT3kKey);
+    gT3kConnect = CreateWindowW(L"BUTTON",L"Connect",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_CONNECT),nullptr,nullptr); applyFont(gT3kConnect);
+    createSectionLabel(hwnd, L"Search NAM captures", 1020);
+    gT3kSearch = CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|ES_AUTOHSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_SEARCH),nullptr,nullptr); applyFont(gT3kSearch);
+    gT3kSearchButton = CreateWindowW(L"BUTTON",L"Search",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_SEARCH_BUTTON),nullptr,nullptr); applyFont(gT3kSearchButton);
+    createSectionLabel(hwnd, L"Results", 1021);
+    gT3kResults = CreateWindowExW(WS_EX_CLIENTEDGE,L"LISTBOX",L"",WS_CHILD|LBS_NOTIFY|WS_VSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_RESULTS),nullptr,nullptr); applyFont(gT3kResults);
+    createSectionLabel(hwnd, L"NAM model", 1022);
+    gT3kModels = CreateWindowW(L"COMBOBOX",L"",WS_CHILD|CBS_DROPDOWNLIST|WS_VSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_MODELS),nullptr,nullptr); applyFont(gT3kModels);
+    gT3kUse = CreateWindowW(L"BUTTON",L"Load selected NAM",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_USE),nullptr,nullptr); applyFont(gT3kUse);
+    gT3kState = CreateWindowW(L"STATIC",L"Not connected.",WS_CHILD,0,0,0,0,hwnd,controlId(IDC_T3K_STATE),nullptr,nullptr); applyFont(gT3kState);
 
     gUploaderCloEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                        WS_CHILD | ES_AUTOHSCROLL | ES_READONLY,
@@ -1055,7 +1191,7 @@ void paintBackground(HWND hwnd, HDC hdc) {
 
     drawBitmap(hdc, gLogoBitmap, 28, 18);
 
-    if (gp200UploaderTabSelected() || gp5UploaderTabSelected()) {
+    if (tone3000TabSelected() || gp200UploaderTabSelected() || gp5UploaderTabSelected()) {
         drawRoundedRect(hdc, gUi.uploaderCard, kColorCard, kColorBorder, 18);
     } else {
         drawSectionCard(hdc, gUi.sectionInput, 0);
@@ -1160,7 +1296,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             || ctrl == GetDlgItem(hwnd, 1011) || ctrl == GetDlgItem(hwnd, 1012) || ctrl == GetDlgItem(hwnd, 1013)
             || ctrl == GetDlgItem(hwnd, 1014) || ctrl == gUploaderDevice
             || ctrl == GetDlgItem(hwnd, 1015) || ctrl == GetDlgItem(hwnd, 1016)
-            || ctrl == GetDlgItem(hwnd, 1017) || ctrl == GetDlgItem(hwnd, 1018) || ctrl == gGp5Device) {
+            || ctrl == GetDlgItem(hwnd, 1017) || ctrl == GetDlgItem(hwnd, 1018) || ctrl == gGp5Device
+            || ctrl == GetDlgItem(hwnd,1019) || ctrl == GetDlgItem(hwnd,1020) || ctrl == GetDlgItem(hwnd,1021) || ctrl == GetDlgItem(hwnd,1022) || ctrl == gT3kState) {
             SetTextColor(hdc, ctrl == gSubtitle ? kColorSubtleText : kColorText);
             return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
         }
@@ -1206,6 +1343,15 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         case IDC_CONVERT: startConversion(hwnd); return 0;
         case IDC_OPEN_OUTPUT: openOutputFolder(hwnd); return 0;
+        case IDC_T3K_CONNECT: startT3kAuth(hwnd); return 0;
+        case IDC_T3K_SEARCH_BUTTON: startT3kSearch(hwnd); return 0;
+        case IDC_T3K_SEARCH:
+            if (HIWORD(wParam)==EN_UPDATE) return 0;
+            break;
+        case IDC_T3K_RESULTS:
+            if (HIWORD(wParam)==LBN_SELCHANGE) startT3kModels(hwnd);
+            return 0;
+        case IDC_T3K_USE: startT3kDownload(hwnd); return 0;
         case IDC_UPLOADER_BROWSE: chooseUploaderClo(hwnd); return 0;
         case IDC_UPLOADER_RESCAN:
             refreshUploaderDetection();
@@ -1254,6 +1400,28 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         std::unique_ptr<std::wstring> s(reinterpret_cast<std::wstring*>(lParam));
         if (s) setText(gStatus, *s);
         return 0;
+    }
+    case WM_APP_T3K_AUTH_DONE: {
+        std::unique_ptr<T3kResultMessage> m(reinterpret_cast<T3kResultMessage*>(lParam)); setT3kBusy(false);
+        if(m && m->ok){ setText(gT3kState,L"Connected. Search for a NAM capture."); setText(gStatus,L"Tone3000 connected."); }
+        else if(m){ auto e=wideFromUtf8(m->error); setText(gT3kState,L"Connection failed: "+e); MessageBoxW(hwnd,e.c_str(),L"Tone3000",MB_OK|MB_ICONWARNING); }
+        setT3kBusy(false); return 0;
+    }
+    case WM_APP_T3K_SEARCH_DONE: {
+        std::unique_ptr<T3kSearchMessage> m(reinterpret_cast<T3kSearchMessage*>(lParam)); gT3kTones.clear(); gT3kModelItems.clear(); SendMessageW(gT3kResults,LB_RESETCONTENT,0,0); SendMessageW(gT3kModels,CB_RESETCONTENT,0,0);
+        if(m && m->ok){ gT3kTones=std::move(m->tones); for(const auto&t:gT3kTones){ std::wstring label=wideFromUtf8(t.title+" — "+t.creator+" ["+t.gear+"]"); SendMessageW(gT3kResults,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str())); } setText(gT3kState,L"Found "+std::to_wstring(gT3kTones.size())+L" NAM tones. Select one to load its models."); }
+        else if(m) setText(gT3kState,L"Search failed: "+wideFromUtf8(m->error)); setT3kBusy(false); return 0;
+    }
+    case WM_APP_T3K_MODELS_DONE: {
+        std::unique_ptr<T3kModelsMessage> m(reinterpret_cast<T3kModelsMessage*>(lParam)); gT3kModelItems.clear(); SendMessageW(gT3kModels,CB_RESETCONTENT,0,0);
+        if(m && m->ok){ gT3kModelItems=std::move(m->models); for(const auto&x:gT3kModelItems){ auto label=wideFromUtf8(x.name+" | "+x.size+" | NAM v"+x.architectureVersion); SendMessageW(gT3kModels,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str())); } if(!gT3kModelItems.empty()) SendMessageW(gT3kModels,CB_SETCURSEL,0,0); setText(gT3kState,L"Select a model and press Load selected NAM."); }
+        else if(m) setText(gT3kState,L"Could not load models: "+wideFromUtf8(m->error)); setT3kBusy(false); return 0;
+    }
+    case WM_APP_T3K_DOWNLOAD_DONE: {
+        std::unique_ptr<T3kDownloadMessage> m(reinterpret_cast<T3kDownloadMessage*>(lParam));
+        if(m && m->ok){ setSingleNam(m->path); TabCtrl_SetCurSel(gBackendTabs,0); updateBackendUi(); updateTailControls(); setText(gStatus,L"Tone3000 NAM downloaded and loaded. Choose output/settings and convert normally."); }
+        else if(m){ auto e=wideFromUtf8(m->error); setText(gT3kState,L"Download failed: "+e); MessageBoxW(hwnd,e.c_str(),L"Tone3000",MB_OK|MB_ICONWARNING); }
+        setT3kBusy(false); return 0;
     }
     case WM_APP_UPLOAD_PROGRESS: {
         std::unique_ptr<UploadProgressMessage> m(reinterpret_cast<UploadProgressMessage*>(lParam));

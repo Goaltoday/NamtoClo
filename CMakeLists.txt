@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(NamToClo VERSION 2.7.0 LANGUAGES C CXX RC)
+project(NamToClo VERSION 2.8.0 LANGUAGES C CXX RC)
 
 if(NOT WIN32)
     message(FATAL_ERROR "NAM to CLO targets Windows x64.")
@@ -31,13 +31,15 @@ add_executable(NamToClo WIN32
     src/gp5_clo_upload.hpp
     src/gp5_midi.cpp
     src/gp5_midi.hpp
+    src/tone3000_client.cpp
+    src/tone3000_client.hpp
     src/resources.rc
     src/resource.h
 )
 
 target_compile_features(NamToClo PRIVATE cxx_std_20)
 target_compile_definitions(NamToClo PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
-target_link_libraries(NamToClo PRIVATE comdlg32 shell32 ole32 dbghelp advapi32 comctl32 winmm)
+target_link_libraries(NamToClo PRIVATE comdlg32 shell32 ole32 dbghelp advapi32 comctl32 winmm winhttp bcrypt ws2_32 crypt32)
 
 if(NAM_CORE_SOURCE_DIR)
     set(_ntc_namcore_dir "${NAM_CORE_SOURCE_DIR}")
