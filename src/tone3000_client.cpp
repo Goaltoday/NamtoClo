@@ -7,7 +7,7 @@
 #include <winhttp.h>
 #include <bcrypt.h>
 #include <shellapi.h>
-#include <nlohmann/json.hpp>
+#include <json.hpp>
 
 #include <algorithm>
 #include <chrono>
