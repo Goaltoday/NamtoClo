@@ -41,6 +41,11 @@ public:
 
     bool connected() const noexcept { return !tokens_.accessToken.empty(); }
     void disconnect() noexcept { tokens_ = {}; }
+    const std::string& refreshToken() const noexcept { return tokens_.refreshToken; }
+
+    // Restores a previous OAuth session from a persisted refresh token.
+    // The refresh token should be stored securely by the caller (Windows DPAPI in the GUI).
+    bool restoreSession(std::string refreshToken, std::string& error);
 
     // Opens the system browser, receives the OAuth callback on 127.0.0.1:17836,
     // verifies PKCE state and exchanges the authorization code for bearer tokens.

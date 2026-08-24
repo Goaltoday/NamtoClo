@@ -25,7 +25,7 @@
 namespace ntc::tone3000 {
 namespace {
 constexpr wchar_t kHost[] = L"www.tone3000.com";
-constexpr wchar_t kUserAgent[] = L"NamToClo-Tone3000/2.8";
+constexpr wchar_t kUserAgent[] = L"NamToClo-Tone3000/2.8.8";
 constexpr unsigned short kCallbackPort = 17836;
 constexpr char kRedirectUri[] = "http://127.0.0.1:17836/callback";
 
@@ -214,11 +214,25 @@ std::wstring apiPathFromModelUrl(const std::string& url) {
 Client::Client(std::string publishableKey) : publishableKey_(std::move(publishableKey)) {}
 void Client::setPublishableKey(std::string key) { publishableKey_ = std::move(key); if (publishableKey_.empty()) disconnect(); }
 
+bool Client::restoreSession(std::string refreshToken, std::string& error) {
+    if (publishableKey_.rfind("t3k_pub_", 0) != 0) {
+        error = "Saved Tone3000 session has no valid publishable key";
+        return false;
+    }
+    if (refreshToken.empty()) {
+        error = "No saved Tone3000 refresh token";
+        return false;
+    }
+    tokens_ = {};
+    tokens_.refreshToken = std::move(refreshToken);
+    return refresh(error);
+}
+
 bool Client::authenticateInteractive(std::string& error) {
     if (publishableKey_.rfind("t3k_pub_", 0) != 0) { error = "Enter a valid Tone3000 publishable key (t3k_pub_...)"; return false; }
     const std::string verifier = randomBase64Url(32), state = randomBase64Url(16), challenge = sha256Base64Url(verifier);
     if (verifier.empty() || state.empty() || challenge.empty()) { error = "Could not generate PKCE values"; return false; }
-    const std::string url = "https://tone3000.com/api/v1/oauth/authorize?client_id=" + urlEncode(publishableKey_) +
+    const std::string url = "https://www.tone3000.com/api/v1/oauth/authorize?client_id=" + urlEncode(publishableKey_) +
         "&redirect_uri=" + urlEncode(kRedirectUri) + "&response_type=code&code_challenge=" + urlEncode(challenge) +
         "&code_challenge_method=S256&state=" + urlEncode(state) + "&format=nam";
 

@@ -6,6 +6,7 @@
 #include "resource.h"
 
 #include <windows.h>
+#include <dpapi.h>
 #include <commdlg.h>
 #include <commctrl.h>
 #include <shlobj.h>
@@ -34,6 +35,7 @@ constexpr UINT WM_APP_T3K_AUTH_DONE = WM_APP + 8;
 constexpr UINT WM_APP_T3K_SEARCH_DONE = WM_APP + 9;
 constexpr UINT WM_APP_T3K_MODELS_DONE = WM_APP + 10;
 constexpr UINT WM_APP_T3K_DOWNLOAD_DONE = WM_APP + 11;
+constexpr UINT WM_APP_T3K_AUTOLOGIN_DONE = WM_APP + 12;
 constexpr int IDC_INPUT_PATH = 101;
 constexpr int IDC_LOAD_FILE = 102;
 constexpr int IDC_LOAD_FOLDER = 103;
@@ -367,6 +369,58 @@ void saveT3kKey(const std::wstring& key) {
     RegCloseKey(hKey);
 }
 
+
+std::string loadSavedT3kRefreshToken() {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\NamToClo", 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS) return {};
+    DWORD type = 0, bytes = 0;
+    if (RegQueryValueExW(hKey, L"Tone3000RefreshToken", nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS ||
+        type != REG_BINARY || bytes == 0) {
+        RegCloseKey(hKey);
+        return {};
+    }
+    std::vector<BYTE> encrypted(bytes);
+    if (RegQueryValueExW(hKey, L"Tone3000RefreshToken", nullptr, nullptr, encrypted.data(), &bytes) != ERROR_SUCCESS) {
+        RegCloseKey(hKey);
+        return {};
+    }
+    RegCloseKey(hKey);
+
+    DATA_BLOB in{bytes, encrypted.data()};
+    DATA_BLOB out{};
+    if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)) return {};
+    std::string token(reinterpret_cast<const char*>(out.pbData), reinterpret_cast<const char*>(out.pbData) + out.cbData);
+    LocalFree(out.pbData);
+    return token;
+}
+
+void saveT3kRefreshToken(const std::string& token) {
+    if (token.empty()) return;
+    DATA_BLOB in{static_cast<DWORD>(token.size()), reinterpret_cast<BYTE*>(const_cast<char*>(token.data()))};
+    DATA_BLOB out{};
+    if (!CryptProtectData(&in, L"NamToClo Tone3000 OAuth", nullptr, nullptr, nullptr,
+                          CRYPTPROTECT_UI_FORBIDDEN, &out)) return;
+    HKEY hKey = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\NamToClo", 0, nullptr, 0, KEY_SET_VALUE,
+                        nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
+        RegSetValueExW(hKey, L"Tone3000RefreshToken", 0, REG_BINARY, out.pbData, out.cbData);
+        RegCloseKey(hKey);
+    }
+    LocalFree(out.pbData);
+}
+
+void clearSavedT3kRefreshToken() {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\NamToClo", 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
+        RegDeleteValueW(hKey, L"Tone3000RefreshToken");
+        RegCloseKey(hKey);
+    }
+}
+
+void syncT3kConnectButton() {
+    if (gT3kConnect) setText(gT3kConnect, gT3kClient.connected() ? L"Disconnect" : L"Connect");
+}
+
 void updateT3kPagingControls() {
     if (gT3kPageLabel) {
         setText(gT3kPageLabel, L"Page " + std::to_wstring(gT3kPage) + L" of " + std::to_wstring(gT3kTotalPages));
@@ -377,8 +431,9 @@ void updateT3kPagingControls() {
 
 void setT3kBusy(bool busy) {
     gT3kBusy=busy;
-    EnableWindow(gT3kKey,!busy);
+    EnableWindow(gT3kKey,!busy && !gT3kClient.connected());
     EnableWindow(gT3kConnect,!busy);
+    syncT3kConnectButton();
     EnableWindow(gT3kSearch,!busy && gT3kClient.connected());
     EnableWindow(gT3kSearchButton,!busy && gT3kClient.connected());
     EnableWindow(gT3kSort,!busy && gT3kClient.connected());
@@ -390,12 +445,37 @@ void setT3kBusy(bool busy) {
 
 void startT3kAuth(HWND hwnd) {
     if (gT3kBusy) return;
+    if (gT3kClient.connected()) {
+        gT3kClient.disconnect();
+        clearSavedT3kRefreshToken();
+        gT3kTones.clear(); gT3kModelItems.clear(); gT3kPage=1; gT3kTotalPages=1; gT3kTotalResults=0;
+        SendMessageW(gT3kResults,LB_RESETCONTENT,0,0); SendMessageW(gT3kModels,CB_RESETCONTENT,0,0);
+        setText(gT3kState,L"Disconnected. Your API key is still saved.");
+        setText(gStatus,L"Tone3000 disconnected.");
+        setT3kBusy(false);
+        return;
+    }
     const auto keyText=getText(gT3kKey);
     const auto key=utf8FromWide(keyText);
     gT3kClient.setPublishableKey(key);
     saveT3kKey(keyText);
     setT3kBusy(true); setText(gT3kState,L"Opening Tone3000 authorization in your browser...");
     std::thread([hwnd]{ auto* m=new T3kResultMessage; m->ok=gT3kClient.authenticateInteractive(m->error); PostMessageW(hwnd,WM_APP_T3K_AUTH_DONE,0,reinterpret_cast<LPARAM>(m)); }).detach();
+}
+
+void startT3kAutoLogin(HWND hwnd) {
+    if (gT3kBusy || gT3kClient.connected()) return;
+    const auto keyText = getText(gT3kKey);
+    const auto refreshToken = loadSavedT3kRefreshToken();
+    if (keyText.empty() || refreshToken.empty()) return;
+    gT3kClient.setPublishableKey(utf8FromWide(keyText));
+    setT3kBusy(true);
+    setText(gT3kState,L"Restoring previous Tone3000 session...");
+    std::thread([hwnd, refreshToken]{
+        auto* m = new T3kResultMessage;
+        m->ok = gT3kClient.restoreSession(refreshToken, m->error);
+        PostMessageW(hwnd, WM_APP_T3K_AUTOLOGIN_DONE, 0, reinterpret_cast<LPARAM>(m));
+    }).detach();
 }
 
 std::string currentT3kSort() {
@@ -1129,6 +1209,7 @@ void createUi(HWND hwnd) {
     const auto savedT3kKey = loadSavedT3kKey();
     if (!savedT3kKey.empty()) setText(gT3kKey, savedT3kKey);
     updateT3kPagingControls();
+    if (!savedT3kKey.empty() && !loadSavedT3kRefreshToken().empty()) startT3kAutoLogin(hwnd);
 
     gUploaderCloEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                        WS_CHILD | ES_AUTOHSCROLL | ES_READONLY,
@@ -1507,14 +1588,33 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
     }
     case WM_APP_T3K_AUTH_DONE: {
-        std::unique_ptr<T3kResultMessage> m(reinterpret_cast<T3kResultMessage*>(lParam)); setT3kBusy(false);
-        if(m && m->ok){ setText(gT3kState,L"Connected. Search for a NAM capture."); setText(gStatus,L"Tone3000 connected."); }
+        std::unique_ptr<T3kResultMessage> m(reinterpret_cast<T3kResultMessage*>(lParam));
+        if(m && m->ok){
+            saveT3kRefreshToken(gT3kClient.refreshToken());
+            setText(gT3kState,L"Connected. Session will be restored automatically next time.");
+            setText(gStatus,L"Tone3000 connected.");
+        }
         else if(m){ auto e=wideFromUtf8(m->error); setText(gT3kState,L"Connection failed: "+e); MessageBoxW(hwnd,e.c_str(),L"Tone3000",MB_OK|MB_ICONWARNING); }
+        setT3kBusy(false); return 0;
+    }
+    case WM_APP_T3K_AUTOLOGIN_DONE: {
+        std::unique_ptr<T3kResultMessage> m(reinterpret_cast<T3kResultMessage*>(lParam));
+        if(m && m->ok){
+            saveT3kRefreshToken(gT3kClient.refreshToken());
+            setText(gT3kState,L"Connected automatically. Search for a NAM capture.");
+            setText(gStatus,L"Tone3000 session restored.");
+        } else {
+            clearSavedT3kRefreshToken();
+            gT3kClient.disconnect();
+            setText(gT3kState,L"Saved session expired. Press Connect to authorize again.");
+            setText(gStatus,L"Tone3000 needs authorization again.");
+        }
         setT3kBusy(false); return 0;
     }
     case WM_APP_T3K_SEARCH_DONE: {
         std::unique_ptr<T3kSearchMessage> m(reinterpret_cast<T3kSearchMessage*>(lParam)); gT3kTones.clear(); gT3kModelItems.clear(); SendMessageW(gT3kResults,LB_RESETCONTENT,0,0); SendMessageW(gT3kModels,CB_RESETCONTENT,0,0);
         if(m && m->ok){
+            saveT3kRefreshToken(gT3kClient.refreshToken());
             gT3kPage=m->page; gT3kTotalPages=m->totalPages; gT3kTotalResults=m->totalResults;
             gT3kTones=std::move(m->tones);
             for(const auto&t:gT3kTones){ std::wstring label=wideFromUtf8(t.title+" — "+t.creator+" ["+t.gear+"]"); SendMessageW(gT3kResults,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str())); }
@@ -1524,12 +1624,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     case WM_APP_T3K_MODELS_DONE: {
         std::unique_ptr<T3kModelsMessage> m(reinterpret_cast<T3kModelsMessage*>(lParam)); gT3kModelItems.clear(); SendMessageW(gT3kModels,CB_RESETCONTENT,0,0);
-        if(m && m->ok){ gT3kModelItems=std::move(m->models); for(const auto&x:gT3kModelItems){ auto label=wideFromUtf8(x.name+" | "+x.size+" | NAM v"+x.architectureVersion); SendMessageW(gT3kModels,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str())); } if(!gT3kModelItems.empty()) SendMessageW(gT3kModels,CB_SETCURSEL,0,0); setText(gT3kState,L"Select a model and press Load selected NAM."); }
+        if(m && m->ok){ saveT3kRefreshToken(gT3kClient.refreshToken()); gT3kModelItems=std::move(m->models); for(const auto&x:gT3kModelItems){ auto label=wideFromUtf8(x.name+" | "+x.size+" | NAM v"+x.architectureVersion); SendMessageW(gT3kModels,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str())); } if(!gT3kModelItems.empty()) SendMessageW(gT3kModels,CB_SETCURSEL,0,0); setText(gT3kState,L"Select a model and press Load selected NAM."); }
         else if(m) setText(gT3kState,L"Could not load models: "+wideFromUtf8(m->error)); setT3kBusy(false); return 0;
     }
     case WM_APP_T3K_DOWNLOAD_DONE: {
         std::unique_ptr<T3kDownloadMessage> m(reinterpret_cast<T3kDownloadMessage*>(lParam));
-        if(m && m->ok){ setSingleNam(m->path); TabCtrl_SetCurSel(gBackendTabs,0); updateBackendUi(); updateTailControls(); setText(gStatus,L"Tone3000 NAM downloaded and loaded. Choose output/settings and convert normally."); }
+        if(m && m->ok){ saveT3kRefreshToken(gT3kClient.refreshToken()); setSingleNam(m->path); TabCtrl_SetCurSel(gBackendTabs,0); updateBackendUi(); updateTailControls(); setText(gStatus,L"Tone3000 NAM downloaded and loaded. Choose output/settings and convert normally."); }
         else if(m){ auto e=wideFromUtf8(m->error); setText(gT3kState,L"Download failed: "+e); MessageBoxW(hwnd,e.c_str(),L"Tone3000",MB_OK|MB_ICONWARNING); }
         setT3kBusy(false); return 0;
     }
