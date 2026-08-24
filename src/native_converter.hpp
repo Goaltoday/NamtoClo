@@ -50,4 +50,12 @@ BatchConversionResult convertNamFolderToClo(const fs::path& inputDirectory,
                                             NativeConverterConfig converter = {},
                                             const StatusCallback& status = {});
 
+// Renders an arbitrary WAV through the selected NAM for the Tone3000 preview player.
+// The input is downmixed to mono, resampled to the NAM expected sample rate and
+// written as a mono PCM16 WAV suitable for Win32 PlaySound.
+bool renderNamPreviewToWav(const fs::path& inputNam,
+                           const fs::path& inputWav,
+                           const fs::path& outputWav,
+                           std::string& error);
+
 } // namespace ntc

@@ -12,7 +12,7 @@ namespace fs = std::filesystem;
 
 inline constexpr std::uint64_t kExpectedCloSize = 0x2288;
 inline constexpr std::uint32_t kExpectedApiReturn = 0x2288;
-inline constexpr wchar_t kVersion[] = L"2.8.8";
+inline constexpr wchar_t kVersion[] = L"2.8.9";
 
 struct CloInfo {
     bool exists = false;

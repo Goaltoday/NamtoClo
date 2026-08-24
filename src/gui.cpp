@@ -6,6 +6,7 @@
 #include "resource.h"
 
 #include <windows.h>
+#include <mmsystem.h>
 #include <dpapi.h>
 #include <commdlg.h>
 #include <commctrl.h>
@@ -36,6 +37,7 @@ constexpr UINT WM_APP_T3K_SEARCH_DONE = WM_APP + 9;
 constexpr UINT WM_APP_T3K_MODELS_DONE = WM_APP + 10;
 constexpr UINT WM_APP_T3K_DOWNLOAD_DONE = WM_APP + 11;
 constexpr UINT WM_APP_T3K_AUTOLOGIN_DONE = WM_APP + 12;
+constexpr UINT WM_APP_T3K_PREVIEW_DONE = WM_APP + 13;
 constexpr int IDC_INPUT_PATH = 101;
 constexpr int IDC_LOAD_FILE = 102;
 constexpr int IDC_LOAD_FOLDER = 103;
@@ -83,6 +85,8 @@ constexpr int IDC_T3K_PREVIOUS = 147;
 constexpr int IDC_T3K_PAGE = 148;
 constexpr int IDC_T3K_NEXT = 149;
 constexpr int IDC_T3K_SORT = 150;
+constexpr int IDC_T3K_PREVIEW_PLAY = 151;
+constexpr int IDC_T3K_PREVIEW_STOP = 152;
 
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
@@ -139,6 +143,11 @@ HWND gT3kPrevious = nullptr;
 HWND gT3kPageLabel = nullptr;
 HWND gT3kNext = nullptr;
 HWND gT3kSort = nullptr;
+HWND gT3kPreviewPlay = nullptr;
+HWND gT3kPreviewStop = nullptr;
+fs::path gT3kPreviewNam;
+fs::path gT3kPreviewWav;
+bool gT3kPreviewBusy = false;
 ntc::tone3000::Client gT3kClient;
 std::vector<ntc::tone3000::Tone> gT3kTones;
 std::vector<ntc::tone3000::Model> gT3kModelItems;
@@ -317,9 +326,9 @@ bool tone3000TabSelected() {
 
 void showTone3000Ui(HWND hwnd, bool show) {
     const HWND controls[] = { gT3kKey, gT3kConnect, gT3kSearch, gT3kSearchButton,
-        gT3kResults, gT3kModels, gT3kUse, gT3kState, gT3kPrevious, gT3kPageLabel, gT3kNext, gT3kSort };
+        gT3kResults, gT3kModels, gT3kUse, gT3kState, gT3kPrevious, gT3kPageLabel, gT3kNext, gT3kSort, gT3kPreviewPlay, gT3kPreviewStop };
     for (HWND h : controls) showControl(h, show);
-    for (int id : {1019,1020,1021,1022,1023}) showControl(GetDlgItem(hwnd, id), show);
+    for (int id : {1019,1020,1021,1022,1023,1024}) showControl(GetDlgItem(hwnd, id), show);
 }
 
 struct T3kResultMessage { bool ok=false; std::string error; };
@@ -333,6 +342,7 @@ struct T3kSearchMessage {
 };
 struct T3kModelsMessage { bool ok=false; std::string error; std::vector<ntc::tone3000::Model> models; };
 struct T3kDownloadMessage { bool ok=false; std::string error; fs::path path; };
+struct T3kPreviewMessage { bool ok=false; std::string error; fs::path wav; };
 
 std::string utf8FromWide(const std::wstring& s) {
     if (s.empty()) return {};
@@ -533,6 +543,17 @@ void startT3kDownload(HWND hwnd) {
     fs::path dest=dir/(std::to_wstring(model.id)+L".nam");
     setT3kBusy(true); setText(gT3kState,L"Downloading selected NAM...");
     std::thread([hwnd,model,dest]{ auto* m=new T3kDownloadMessage; m->path=dest; m->ok=gT3kClient.downloadModel(model,dest,m->error); PostMessageW(hwnd,WM_APP_T3K_DOWNLOAD_DONE,0,reinterpret_cast<LPARAM>(m)); }).detach();
+}
+
+fs::path tone3000PreviewSource(){ const auto exe=ntc::executablePath(); return exe.empty()?fs::path{}:exe.parent_path()/L"Power - Guitar.wav"; }
+fs::path tone3000PreviewOutput(){ wchar_t local[MAX_PATH]{};if(SHGetFolderPathW(nullptr,CSIDL_LOCAL_APPDATA,nullptr,SHGFP_TYPE_CURRENT,local)!=S_OK)return {};return fs::path(local)/L"NamToClo"/L"Tone3000"/L"preview"/L"tone3000_preview.wav"; }
+void stopT3kPreview(){ PlaySoundW(nullptr,nullptr,0);if(gT3kPreviewStop)EnableWindow(gT3kPreviewStop,FALSE); }
+void startT3kPreview(HWND hwnd,bool forceRender){
+    if(gT3kPreviewBusy||gT3kPreviewNam.empty())return;const fs::path output=tone3000PreviewOutput();std::error_code ec;if(output.empty()){setText(gT3kState,L"NAM loaded, but preview output folder is unavailable.");EnableWindow(gT3kPreviewPlay,TRUE);return;}
+    if(!forceRender&&!output.empty()&&fs::exists(output,ec)&&!ec){gT3kPreviewWav=output;PlaySoundW(output.c_str(),nullptr,SND_FILENAME|SND_ASYNC|SND_NODEFAULT);EnableWindow(gT3kPreviewStop,TRUE);setText(gT3kState,L"Preview playing: Power - Guitar.wav through the loaded NAM.");return;}
+    const fs::path input=tone3000PreviewSource();if(input.empty()||!fs::exists(input,ec)||ec){setText(gT3kState,L"NAM loaded. Preview unavailable: place Power - Guitar.wav next to NamToClo.exe.");EnableWindow(gT3kPreviewPlay,TRUE);return;}
+    gT3kPreviewBusy=true;EnableWindow(gT3kPreviewPlay,FALSE);setText(gT3kState,L"Rendering NAM preview from Power - Guitar.wav...");
+    const fs::path nam=gT3kPreviewNam;std::thread([hwnd,nam,input,output]{auto* m=new T3kPreviewMessage;m->wav=output;m->ok=ntc::renderNamPreviewToWav(nam,input,output,m->error);PostMessageW(hwnd,WM_APP_T3K_PREVIEW_DONE,0,reinterpret_cast<LPARAM>(m));}).detach();
 }
 
 void refreshUploaderDetection() {
@@ -1055,6 +1076,9 @@ void layoutControls(HWND hwnd) {
     moveCtrl(gT3kModels, ux, gUi.uploaderCard.top + 364, ur - ux - 220, 220);
     moveCtrl(gT3kUse, ur - 208, gUi.uploaderCard.top + 360, 208, 36);
     moveCtrl(gT3kState, ux, gUi.uploaderCard.top + 408, ur - ux, 24);
+    moveCtrl(GetDlgItem(hwnd,1024), ux, gUi.uploaderCard.top + 438, 300, 22);
+    moveCtrl(gT3kPreviewPlay, ur - 258, gUi.uploaderCard.top + 434, 158, 32);
+    moveCtrl(gT3kPreviewStop, ur - 92, gUi.uploaderCard.top + 434, 92, 32);
 
     moveCtrl(gUploaderCloEdit, ux, gUi.uploaderCard.top + 56, ur - ux - 136, 30);
     moveCtrl(gUploaderBrowseButton, ur - 124, gUi.uploaderCard.top + 52, 124, 34);
@@ -1206,6 +1230,9 @@ void createUi(HWND hwnd) {
     gT3kModels = CreateWindowW(L"COMBOBOX",L"",WS_CHILD|CBS_DROPDOWNLIST|WS_VSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_MODELS),nullptr,nullptr); applyFont(gT3kModels);
     gT3kUse = CreateWindowW(L"BUTTON",L"Load selected NAM",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_USE),nullptr,nullptr); applyFont(gT3kUse);
     gT3kState = CreateWindowW(L"STATIC",L"Not connected.",WS_CHILD,0,0,0,0,hwnd,controlId(IDC_T3K_STATE),nullptr,nullptr); applyFont(gT3kState);
+    createSectionLabel(hwnd, 1024, L"NAM preview: Power - Guitar.wav");
+    gT3kPreviewPlay = CreateWindowW(L"BUTTON",L"Replay preview",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_PREVIEW_PLAY),nullptr,nullptr); applyFont(gT3kPreviewPlay); EnableWindow(gT3kPreviewPlay,FALSE);
+    gT3kPreviewStop = CreateWindowW(L"BUTTON",L"Stop",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_PREVIEW_STOP),nullptr,nullptr); applyFont(gT3kPreviewStop); EnableWindow(gT3kPreviewStop,FALSE);
     const auto savedT3kKey = loadSavedT3kKey();
     if (!savedT3kKey.empty()) setText(gT3kKey, savedT3kKey);
     updateT3kPagingControls();
@@ -1477,7 +1504,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             || ctrl == GetDlgItem(hwnd, 1014) || ctrl == gUploaderDevice
             || ctrl == GetDlgItem(hwnd, 1015) || ctrl == GetDlgItem(hwnd, 1016)
             || ctrl == GetDlgItem(hwnd, 1017) || ctrl == GetDlgItem(hwnd, 1018) || ctrl == gGp5Device
-            || ctrl == GetDlgItem(hwnd,1019) || ctrl == GetDlgItem(hwnd,1020) || ctrl == GetDlgItem(hwnd,1021) || ctrl == GetDlgItem(hwnd,1022) || ctrl == gT3kState) {
+            || ctrl == GetDlgItem(hwnd,1019) || ctrl == GetDlgItem(hwnd,1020) || ctrl == GetDlgItem(hwnd,1021) || ctrl == GetDlgItem(hwnd,1022) || ctrl == GetDlgItem(hwnd,1023) || ctrl == GetDlgItem(hwnd,1024) || ctrl == gT3kState) {
             SetTextColor(hdc, ctrl == gSubtitle ? kColorSubtleText : kColorText);
             return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
         }
@@ -1538,6 +1565,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (HIWORD(wParam)==LBN_SELCHANGE) startT3kModels(hwnd);
             return 0;
         case IDC_T3K_USE: startT3kDownload(hwnd); return 0;
+        case IDC_T3K_PREVIEW_PLAY: startT3kPreview(hwnd,false); return 0;
+        case IDC_T3K_PREVIEW_STOP: stopT3kPreview(); return 0;
         case IDC_UPLOADER_BROWSE: chooseUploaderClo(hwnd); return 0;
         case IDC_UPLOADER_RESCAN:
             refreshUploaderDetection();
@@ -1629,9 +1658,15 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     case WM_APP_T3K_DOWNLOAD_DONE: {
         std::unique_ptr<T3kDownloadMessage> m(reinterpret_cast<T3kDownloadMessage*>(lParam));
-        if(m && m->ok){ saveT3kRefreshToken(gT3kClient.refreshToken()); setSingleNam(m->path); TabCtrl_SetCurSel(gBackendTabs,0); updateBackendUi(); updateTailControls(); setText(gStatus,L"Tone3000 NAM downloaded and loaded. Choose output/settings and convert normally."); }
+        if(m && m->ok){ saveT3kRefreshToken(gT3kClient.refreshToken()); setSingleNam(m->path); gT3kPreviewNam=m->path; gT3kPreviewWav.clear(); EnableWindow(gT3kPreviewPlay,FALSE); stopT3kPreview(); setText(gStatus,L"Tone3000 NAM downloaded and loaded into the converter."); startT3kPreview(hwnd,true); }
         else if(m){ auto e=wideFromUtf8(m->error); setText(gT3kState,L"Download failed: "+e); MessageBoxW(hwnd,e.c_str(),L"Tone3000",MB_OK|MB_ICONWARNING); }
         setT3kBusy(false); return 0;
+    }
+    case WM_APP_T3K_PREVIEW_DONE: {
+        std::unique_ptr<T3kPreviewMessage> m(reinterpret_cast<T3kPreviewMessage*>(lParam));gT3kPreviewBusy=false;EnableWindow(gT3kPreviewPlay,TRUE);
+        if(m && m->ok){gT3kPreviewWav=m->wav;PlaySoundW(m->wav.c_str(),nullptr,SND_FILENAME|SND_ASYNC|SND_NODEFAULT);EnableWindow(gT3kPreviewStop,TRUE);setText(gT3kState,L"Preview playing: Power - Guitar.wav through the loaded NAM.");}
+        else if(m){setText(gT3kState,L"NAM loaded, but preview failed: "+wideFromUtf8(m->error));}
+        return 0;
     }
     case WM_APP_UPLOAD_PROGRESS: {
         std::unique_ptr<UploadProgressMessage> m(reinterpret_cast<UploadProgressMessage*>(lParam));
@@ -1740,6 +1775,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         DestroyWindow(hwnd); return 0;
     case WM_DESTROY:
+        PlaySoundW(nullptr,nullptr,0);
         destroyResources();
         PostQuitMessage(0); return 0;
     }
