@@ -197,8 +197,10 @@ bool buildCloUpload(const std::filesystem::path& cloFile,
         error = L"The selected CLO file does not exist.";
         return false;
     }
-    if (slot < 0 || slot >= 80) {
-        error = L"The GP-5 destination must be SnapTone 1-80.";
+    // Only the experimentally validated user SnapTone range is exposed:
+    // visible SnapTone 51..80 == zero-based protocol slots 50..79.
+    if (slot < 50 || slot >= 80) {
+        error = L"The GP-5 destination must be SnapTone 51-80.";
         return false;
     }
 

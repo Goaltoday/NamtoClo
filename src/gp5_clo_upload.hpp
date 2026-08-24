@@ -10,7 +10,7 @@ namespace ntc::gp5 {
 struct CloUploadData {
     std::vector<std::vector<std::uint8_t>> chunks;
     std::string displayName;
-    int slot = -1; // zero-based GP-5 SnapTone slot: 0..79
+    int slot = -1; // zero-based GP-5 SnapTone slot: 50..79 (visible 51..80)
     std::size_t compactCloBytes = 0;
 };
 

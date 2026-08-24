@@ -297,7 +297,7 @@ void updateBackendUi() {
         refreshUploaderDetection();
         if (!gUploadBusy) setText(gStatus, L"GP-200 Uploader ready.");
     } else if (gp5) {
-        setText(gSubtitle, L"Adapt a CLO to the GP-5 A128/B512 transfer format and upload it to SnapTone 1-80.");
+        setText(gSubtitle, L"Adapt a CLO to the GP-5 A128/B512 transfer format and upload it to SnapTone 51-80.");
         refreshGp5Detection();
         if (!gGp5UploadBusy) setText(gStatus, L"GP-5 Uploader ready.");
     } else {
@@ -633,7 +633,7 @@ void chooseGp5Clo(HWND hwnd) {
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
     if (GetOpenFileNameW(&ofn)) {
         setText(gGp5CloEdit, file);
-        setText(gStatus, L"CLO selected. Choose SnapTone 1-80 and press Upload to GP-5.");
+        setText(gStatus, L"CLO selected. Choose SnapTone 51-80 and press Upload to GP-5.");
     }
 }
 
@@ -644,11 +644,14 @@ void startGp5Uploader(HWND hwnd) {
         MessageBoxW(hwnd, L"Select a .clo file first.", L"GP-5 Uploader", MB_OK | MB_ICONINFORMATION);
         return;
     }
-    const int slot = static_cast<int>(SendMessageW(gGp5SlotCombo, CB_GETCURSEL, 0, 0));
-    if (slot < 0 || slot >= 80) {
-        MessageBoxW(hwnd, L"Select a destination SnapTone slot (1-80).", L"GP-5 Uploader", MB_OK | MB_ICONINFORMATION);
+    const int selection = static_cast<int>(SendMessageW(gGp5SlotCombo, CB_GETCURSEL, 0, 0));
+    if (selection < 0 || selection >= 30) {
+        MessageBoxW(hwnd, L"Select a destination SnapTone slot (51-80).", L"GP-5 Uploader", MB_OK | MB_ICONINFORMATION);
         return;
     }
+    // The combo contains visible SnapTone 51..80, while the GP-5 protocol
+    // uses a zero-based slot byte. Therefore selection 0 -> slot 50 (SnapTone 51).
+    const int slot = selection + 50;
 
     const auto d = ntc::gp5::detectGp5Midi();
     if (!d.inputFound || !d.outputFound) {
@@ -923,7 +926,7 @@ void createUi(HWND hwnd) {
     applyFont(gUploaderUploadButton);
 
     createSectionLabel(hwnd, 1015, L"CLO file (adapted automatically to GP-5 B512)");
-    createSectionLabel(hwnd, 1016, L"Destination SnapTone slot (1-80)");
+    createSectionLabel(hwnd, 1016, L"Destination SnapTone slot (51-80)");
     createSectionLabel(hwnd, 1017, L"USB MIDI device");
     createSectionLabel(hwnd, 1018, L"Transfer progress");
 
@@ -937,7 +940,7 @@ void createUi(HWND hwnd) {
     gGp5SlotCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
                                   0, 0, 310, 260, hwnd, controlId(IDC_GP5_SLOT), nullptr, nullptr);
     applyFont(gGp5SlotCombo);
-    for (int i = 1; i <= 80; ++i) {
+    for (int i = 51; i <= 80; ++i) {
         const std::wstring name = L"SnapTone " + std::to_wstring(i);
         SendMessageW(gGp5SlotCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
     }
@@ -1230,7 +1233,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (ext == L".clo") {
                     if (gp5UploaderTabSelected()) {
                         setText(gGp5CloEdit, p.wstring());
-                        setText(gStatus, L"CLO selected. Choose SnapTone 1-80 and press Upload to GP-5.");
+                        setText(gStatus, L"CLO selected. Choose SnapTone 51-80 and press Upload to GP-5.");
                     } else {
                         setText(gUploaderCloEdit, p.wstring());
                         setText(gStatus, L"CLO selected. Choose a destination slot and press Upload to GP-200.");

@@ -6,7 +6,7 @@ The application has three tabs:
 
 - **Convert to CLO** — convert one NAM model or every NAM model in a folder.
 - **GP-200 Uploader** — upload an existing `.clo` file to one of the 10 GP-200 SnapTone slots.
-- **GP-5 Uploader** — adapt a compatible CLO to the GP-5 transfer format and upload it to SnapTone 1-80.
+- **GP-5 Uploader** — adapt a compatible CLO to the GP-5 transfer format and upload it to SnapTone 51-80.
 
 > This is an independent research/reimplementation project and is not affiliated with or endorsed by Valeton or Hotone.
 
@@ -235,9 +235,9 @@ payload size  = 0x0A00
 
 The internal CLO CRC16/MODBUS is recalculated automatically.
 
-### 3. Select SnapTone 1-80
+### 3. Select SnapTone 51-80
 
-Choose the destination slot. Valeton Suite uses zero-based slot numbering internally, so visible SnapTone 1 maps to slot byte `0x00` and visible SnapTone 80 maps to `0x4F`.
+Choose a destination from SnapTone 51 to SnapTone 80. This is the range validated from Valeton Suite captures. The protocol is zero-based, so visible SnapTone 51 maps to slot byte `0x32` and visible SnapTone 80 maps to `0x4F`.
 
 ### 4. Upload
 
