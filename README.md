@@ -442,3 +442,8 @@ choice is made.
 ### Tone3000 downloaded file names (v2.9.2)
 
 Tone3000 models are stored using the model's human-readable name instead of the numeric model ID. For example, `VH4 CH3 G6.5` is saved as `VH4 CH3 G6.5.nam`. Windows-invalid filename characters are replaced with `_`. Because CLO output names are derived from the input NAM stem, converted CLO files use the same model name automatically.
+
+
+## Tone3000 UI status fix (v2.9.4)
+
+The Tone3000 status line is now painted with an opaque card background and forced to one line, preventing previous status messages from accumulating visually above the Preview WAV row.

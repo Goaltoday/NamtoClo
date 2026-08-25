@@ -1331,7 +1331,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1022, L"NAM model");
     gT3kModels = CreateWindowW(L"COMBOBOX",L"",WS_CHILD|CBS_DROPDOWNLIST|WS_VSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_MODELS),nullptr,nullptr); applyFont(gT3kModels);
     gT3kUse = CreateWindowW(L"BUTTON",L"Load selected NAM",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_USE),nullptr,nullptr); applyFont(gT3kUse);
-    gT3kState = CreateWindowW(L"STATIC",L"Not connected.",WS_CHILD,0,0,0,0,hwnd,controlId(IDC_T3K_STATE),nullptr,nullptr); applyFont(gT3kState);
+    gT3kState = CreateWindowW(L"STATIC",L"Not connected.",WS_CHILD|SS_LEFTNOWORDWRAP,0,0,0,0,hwnd,controlId(IDC_T3K_STATE),nullptr,nullptr); applyFont(gT3kState);
     createSectionLabel(hwnd, 1024, L"Preview WAV");
     gT3kPreviewWav = CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|ES_AUTOHSCROLL|ES_READONLY,0,0,0,0,hwnd,controlId(IDC_T3K_PREVIEW_WAV),nullptr,nullptr); applyFont(gT3kPreviewWav);
     gT3kPreviewBrowse = CreateWindowW(L"BUTTON",L"Browse WAV...",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_PREVIEW_BROWSE),nullptr,nullptr); applyFont(gT3kPreviewBrowse);
@@ -1600,6 +1600,14 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SetTextColor(hdc, kColorSubtleText);
             return reinterpret_cast<LRESULT>(gInfoBrush);
         }
+        if (ctrl == gT3kState) {
+            // This status text changes frequently. Give it an opaque card
+            // background so old transparent text is fully erased on update.
+            SetBkMode(hdc, OPAQUE);
+            SetBkColor(hdc, kColorCard);
+            SetTextColor(hdc, kColorText);
+            return reinterpret_cast<LRESULT>(gCardBrush);
+        }
         if (ctrl == gSubtitle || ctrl == GetDlgItem(hwnd, 1001)
             || ctrl == GetDlgItem(hwnd, 1002) || ctrl == GetDlgItem(hwnd, 1003) || ctrl == GetDlgItem(hwnd, 1004)
             || ctrl == GetDlgItem(hwnd, 1005) || ctrl == GetDlgItem(hwnd, 1006) || ctrl == GetDlgItem(hwnd, 1007)
@@ -1608,7 +1616,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             || ctrl == GetDlgItem(hwnd, 1014) || ctrl == gUploaderDevice
             || ctrl == GetDlgItem(hwnd, 1015) || ctrl == GetDlgItem(hwnd, 1016)
             || ctrl == GetDlgItem(hwnd, 1017) || ctrl == GetDlgItem(hwnd, 1018) || ctrl == gGp5Device
-            || ctrl == GetDlgItem(hwnd,1019) || ctrl == GetDlgItem(hwnd,1020) || ctrl == GetDlgItem(hwnd,1021) || ctrl == GetDlgItem(hwnd,1022) || ctrl == GetDlgItem(hwnd,1023) || ctrl == GetDlgItem(hwnd,1024) || ctrl == gT3kState) {
+            || ctrl == GetDlgItem(hwnd,1019) || ctrl == GetDlgItem(hwnd,1020) || ctrl == GetDlgItem(hwnd,1021) || ctrl == GetDlgItem(hwnd,1022) || ctrl == GetDlgItem(hwnd,1023) || ctrl == GetDlgItem(hwnd,1024)) {
             SetTextColor(hdc, ctrl == gSubtitle ? kColorSubtleText : kColorText);
             return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
         }
