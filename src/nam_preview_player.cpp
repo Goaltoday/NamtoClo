@@ -294,6 +294,7 @@ struct NamPreviewPlayer::Impl {
     std::thread thread;
     std::atomic<bool> stopRequested{false};
     std::atomic<bool> isPlaying{false};
+    HANDLE playbackEvent = nullptr;
 
     ~Impl() {
         stop();
@@ -303,29 +304,36 @@ struct NamPreviewPlayer::Impl {
 
     void stop() {
         stopRequested.store(true, std::memory_order_release);
+        // Wake the playback worker immediately if it is waiting for waveOut.
+        {
+            std::scoped_lock lock(mutex);
+            if (playbackEvent) SetEvent(playbackEvent);
+        }
         if (thread.joinable()) thread.join();
         isPlaying.store(false, std::memory_order_release);
     }
 
     bool start(std::string& error) {
         stop();
+        int localRate = 0;
         {
             std::scoped_lock lock(mutex);
             if (!dsp || source.empty() || rate <= 0) {
                 error = "Realtime preview is not loaded.";
                 return false;
             }
+            localRate = rate;
         }
         WAVEFORMATEX probe{};
         probe.wFormatTag = WAVE_FORMAT_PCM;
         probe.nChannels = 2;
-        probe.nSamplesPerSec = static_cast<DWORD>(rate);
+        probe.nSamplesPerSec = static_cast<DWORD>(localRate);
         probe.wBitsPerSample = 16;
         probe.nBlockAlign = static_cast<WORD>((probe.nChannels * probe.wBitsPerSample) / 8);
         probe.nAvgBytesPerSec = probe.nSamplesPerSec * probe.nBlockAlign;
         const MMRESULT query = waveOutOpen(nullptr, WAVE_MAPPER, &probe, 0, 0, WAVE_FORMAT_QUERY);
         if (query != MMSYSERR_NOERROR) {
-            error = "The default Windows audio output cannot open the NAM sample rate (" + std::to_string(rate) + " Hz).";
+            error = "The default Windows audio output cannot open the NAM sample rate (" + std::to_string(localRate) + " Hz).";
             return false;
         }
         stopRequested.store(false, std::memory_order_release);
@@ -335,19 +343,30 @@ struct NamPreviewPlayer::Impl {
     }
 
     void run() {
-        constexpr std::size_t kBufferCount = 4;
-        constexpr int kFramesPerBuffer = 256;
-        std::unique_lock lock(mutex);
-        auto* localDsp = dsp.get();
-        const auto* src = &source;
-        const int sampleRate = rate;
-        if (!localDsp || src->empty()) {
+        // This is a preview player, not a low-latency live input path.  A deeper
+        // queue is intentional: it gives Windows/NAM enough scheduling margin
+        // without changing the fact that the NAM is processed block-by-block.
+        constexpr std::size_t kBufferCount = 8;
+        constexpr int kFramesPerBuffer = 1024;
+
+        nam::DSP* localDsp = nullptr;
+        const std::vector<float>* src = nullptr;
+        int sampleRate = 0;
+        {
+            // Only snapshot the objects. load() always calls stop() before it can
+            // replace them, so they remain valid until this worker has finished.
+            std::scoped_lock lock(mutex);
+            localDsp = dsp.get();
+            src = &source;
+            sampleRate = rate;
+        }
+        if (!localDsp || !src || src->empty() || sampleRate <= 0) {
             isPlaying.store(false, std::memory_order_release);
             return;
         }
 
         try {
-            localDsp->Reset(static_cast<double>(sampleRate), 1024);
+            localDsp->Reset(static_cast<double>(sampleRate), kFramesPerBuffer);
         } catch (...) {
             isPlaying.store(false, std::memory_order_release);
             return;
@@ -361,26 +380,53 @@ struct NamPreviewPlayer::Impl {
         fmt.nBlockAlign = static_cast<WORD>((fmt.nChannels * fmt.wBitsPerSample) / 8);
         fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
 
+        HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (!event) {
+            isPlaying.store(false, std::memory_order_release);
+            return;
+        }
+        {
+            std::scoped_lock lock(mutex);
+            playbackEvent = event;
+        }
+
         HWAVEOUT wave = nullptr;
-        const MMRESULT openResult = waveOutOpen(&wave, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL);
+        const MMRESULT openResult = waveOutOpen(
+            &wave, WAVE_MAPPER, &fmt,
+            reinterpret_cast<DWORD_PTR>(event), 0, CALLBACK_EVENT);
         if (openResult != MMSYSERR_NOERROR) {
+            {
+                std::scoped_lock lock(mutex);
+                playbackEvent = nullptr;
+            }
+            CloseHandle(event);
             isPlaying.store(false, std::memory_order_release);
             return;
         }
 
         std::array<std::vector<std::int16_t>, kBufferCount> pcm;
         std::array<WAVEHDR, kBufferCount> headers{};
+        std::size_t prepared = 0;
         for (std::size_t i = 0; i < kBufferCount; ++i) {
             pcm[i].resize(static_cast<std::size_t>(kFramesPerBuffer) * 2u);
             headers[i].lpData = reinterpret_cast<LPSTR>(pcm[i].data());
             headers[i].dwBufferLength = static_cast<DWORD>(pcm[i].size() * sizeof(std::int16_t));
-            if (waveOutPrepareHeader(wave, &headers[i], sizeof(WAVEHDR)) != MMSYSERR_NOERROR) {
-                for (std::size_t j = 0; j < i; ++j)
-                    waveOutUnprepareHeader(wave, &headers[j], sizeof(WAVEHDR));
-                waveOutClose(wave);
-                isPlaying.store(false, std::memory_order_release);
-                return;
+            if (waveOutPrepareHeader(wave, &headers[i], sizeof(WAVEHDR)) != MMSYSERR_NOERROR)
+                break;
+            ++prepared;
+        }
+        if (prepared != kBufferCount) {
+            waveOutReset(wave);
+            for (std::size_t i = 0; i < prepared; ++i)
+                waveOutUnprepareHeader(wave, &headers[i], sizeof(WAVEHDR));
+            waveOutClose(wave);
+            {
+                std::scoped_lock lock(mutex);
+                playbackEvent = nullptr;
             }
+            CloseHandle(event);
+            isPlaying.store(false, std::memory_order_release);
+            return;
         }
 
         std::array<NAM_SAMPLE, kFramesPerBuffer> input{};
@@ -392,7 +438,7 @@ struct NamPreviewPlayer::Impl {
         std::array<bool, kBufferCount> active{};
 
         auto queueBuffer = [&](std::size_t i) -> bool {
-            if (pos >= src->size()) return false;
+            if (pos >= src->size() || stopRequested.load(std::memory_order_acquire)) return false;
             const int n = static_cast<int>(std::min<std::size_t>(kFramesPerBuffer, src->size() - pos));
             for (int s = 0; s < n; ++s)
                 input[static_cast<std::size_t>(s)] = static_cast<NAM_SAMPLE>((*src)[pos + static_cast<std::size_t>(s)]);
@@ -426,29 +472,43 @@ struct NamPreviewPlayer::Impl {
             queueBuffer(i);
 
         while (queued > 0 && !stopRequested.load(std::memory_order_acquire)) {
-            bool progressed = false;
+            // waveOut signals this event when a buffer completes. A finite timeout
+            // also guarantees that Stop can never strand the UI indefinitely.
+            WaitForSingleObject(event, 100);
             for (std::size_t i = 0; i < kBufferCount; ++i) {
                 if (active[i] && (headers[i].dwFlags & WHDR_DONE) != 0) {
                     active[i] = false;
                     --queued;
-                    progressed = true;
                     if (pos < src->size() && !stopRequested.load(std::memory_order_acquire))
                         queueBuffer(i);
                 }
             }
-            if (!progressed) std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        if (stopRequested.load(std::memory_order_acquire)) waveOutReset(wave);
-        while (queued > 0) {
+        if (stopRequested.load(std::memory_order_acquire)) {
+            waveOutReset(wave);
             queued = 0;
-            for (auto& h : headers)
-                if ((h.dwFlags & WHDR_DONE) == 0 && (h.dwFlags & WHDR_INQUEUE) != 0) ++queued;
-            if (queued) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            active.fill(false);
+        } else {
+            // Let the final queued buffers complete before unpreparing them.
+            while (queued > 0) {
+                WaitForSingleObject(event, 100);
+                for (std::size_t i = 0; i < kBufferCount; ++i) {
+                    if (active[i] && (headers[i].dwFlags & WHDR_DONE) != 0) {
+                        active[i] = false;
+                        --queued;
+                    }
+                }
+            }
         }
 
         for (auto& h : headers) waveOutUnprepareHeader(wave, &h, sizeof(WAVEHDR));
         waveOutClose(wave);
+        {
+            std::scoped_lock lock(mutex);
+            playbackEvent = nullptr;
+        }
+        CloseHandle(event);
         isPlaying.store(false, std::memory_order_release);
     }
 };
