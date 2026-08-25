@@ -438,3 +438,7 @@ licensed Steinberg ASIO SDK. A Focusrite can be used directly by selecting its
 Windows playback endpoint as the default output device. Direct ASIO-host support
 can be added later as an optional build once the ASIO SDK licensing/distribution
 choice is made.
+
+### Tone3000 downloaded file names (v2.9.2)
+
+Tone3000 models are stored using the model's human-readable name instead of the numeric model ID. For example, `VH4 CH3 G6.5` is saved as `VH4 CH3 G6.5.nam`. Windows-invalid filename characters are replaced with `_`. Because CLO output names are derived from the input NAM stem, converted CLO files use the same model name automatically.

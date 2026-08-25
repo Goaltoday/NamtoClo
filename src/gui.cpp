@@ -14,6 +14,9 @@
 #include <shlobj.h>
 #include <shellapi.h>
 
+#include <algorithm>
+#include <array>
+#include <cwchar>
 #include <filesystem>
 #include <cwctype>
 #include <memory>
@@ -535,13 +538,43 @@ void startT3kModels(HWND hwnd) {
     std::thread([hwnd,id]{ auto* m=new T3kModelsMessage; m->ok=gT3kClient.listModels(id,m->models,m->error); PostMessageW(hwnd,WM_APP_T3K_MODELS_DONE,0,reinterpret_cast<LPARAM>(m)); }).detach();
 }
 
+std::wstring safeTone3000FileStem(const std::string& modelName) {
+    std::wstring name = wideFromUtf8(modelName);
+    if (name.empty()) name = L"Tone3000 NAM";
+
+    // Windows file names cannot contain these characters. Preserve the model
+    // name as closely as possible so the downloaded NAM and generated CLO
+    // share the same human-readable base name.
+    constexpr wchar_t invalid[] = L"<>:\\|?*\"";
+    for (auto& c : name) {
+        if (c < 32 || std::wcschr(invalid, c) != nullptr) c = L'_';
+    }
+    while (!name.empty() && (name.back() == L'.' || name.back() == L' ')) name.pop_back();
+    if (name.empty()) name = L"Tone3000 NAM";
+
+    // Avoid Windows reserved device names while keeping the visible model name.
+    std::wstring upper = name;
+    std::transform(upper.begin(), upper.end(), upper.begin(), [](wchar_t c) {
+        return static_cast<wchar_t>(std::towupper(c));
+    });
+    static const std::array<const wchar_t*, 22> reserved = {
+        L"CON", L"PRN", L"AUX", L"NUL",
+        L"COM1", L"COM2", L"COM3", L"COM4", L"COM5", L"COM6", L"COM7", L"COM8", L"COM9",
+        L"LPT1", L"LPT2", L"LPT3", L"LPT4", L"LPT5", L"LPT6", L"LPT7", L"LPT8", L"LPT9"
+    };
+    for (const auto* r : reserved) {
+        if (upper == r) { name += L"_"; break; }
+    }
+    return name;
+}
+
 void startT3kDownload(HWND hwnd) {
     if(gT3kBusy) return;
     int sel=static_cast<int>(SendMessageW(gT3kModels,CB_GETCURSEL,0,0)); if(sel<0||sel>=static_cast<int>(gT3kModelItems.size())) return;
     const auto model=gT3kModelItems[static_cast<size_t>(sel)];
     wchar_t local[MAX_PATH]{}; SHGetFolderPathW(nullptr,CSIDL_LOCAL_APPDATA,nullptr,SHGFP_TYPE_CURRENT,local);
     fs::path dir=fs::path(local)/L"NamToClo"/L"Tone3000"/L"models";
-    fs::path dest=dir/(std::to_wstring(model.id)+L".nam");
+    fs::path dest=dir/(safeTone3000FileStem(model.name)+L".nam");
     setT3kBusy(true); setText(gT3kState,L"Downloading selected NAM...");
     std::thread([hwnd,model,dest]{ auto* m=new T3kDownloadMessage; m->path=dest; m->ok=gT3kClient.downloadModel(model,dest,m->error); PostMessageW(hwnd,WM_APP_T3K_DOWNLOAD_DONE,0,reinterpret_cast<LPARAM>(m)); }).detach();
 }
