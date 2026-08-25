@@ -3,6 +3,7 @@
 #include "gp200_midi.hpp"
 #include "gp5_midi.hpp"
 #include "tone3000_client.hpp"
+#include "nam_preview_player.hpp"
 #include "resource.h"
 
 #include <windows.h>
@@ -146,8 +147,8 @@ HWND gT3kSort = nullptr;
 HWND gT3kPreviewPlay = nullptr;
 HWND gT3kPreviewStop = nullptr;
 fs::path gT3kPreviewNam;
-fs::path gT3kPreviewWav;
 bool gT3kPreviewBusy = false;
+ntc::NamPreviewPlayer gT3kPreviewPlayer;
 ntc::tone3000::Client gT3kClient;
 std::vector<ntc::tone3000::Tone> gT3kTones;
 std::vector<ntc::tone3000::Model> gT3kModelItems;
@@ -342,7 +343,7 @@ struct T3kSearchMessage {
 };
 struct T3kModelsMessage { bool ok=false; std::string error; std::vector<ntc::tone3000::Model> models; };
 struct T3kDownloadMessage { bool ok=false; std::string error; fs::path path; };
-struct T3kPreviewMessage { bool ok=false; std::string error; fs::path wav; };
+struct T3kPreviewMessage { bool ok=false; bool playing=false; std::string error; int sampleRate=0; };
 
 std::string utf8FromWide(const std::wstring& s) {
     if (s.empty()) return {};
@@ -546,14 +547,44 @@ void startT3kDownload(HWND hwnd) {
 }
 
 fs::path tone3000PreviewSource(){ const auto exe=ntc::executablePath(); return exe.empty()?fs::path{}:exe.parent_path()/L"Power - Guitar.wav"; }
-fs::path tone3000PreviewOutput(){ wchar_t local[MAX_PATH]{};if(SHGetFolderPathW(nullptr,CSIDL_LOCAL_APPDATA,nullptr,SHGFP_TYPE_CURRENT,local)!=S_OK)return {};return fs::path(local)/L"NamToClo"/L"Tone3000"/L"preview"/L"tone3000_preview.wav"; }
-void stopT3kPreview(){ PlaySoundW(nullptr,nullptr,0);if(gT3kPreviewStop)EnableWindow(gT3kPreviewStop,FALSE); }
-void startT3kPreview(HWND hwnd,bool forceRender){
-    if(gT3kPreviewBusy||gT3kPreviewNam.empty())return;const fs::path output=tone3000PreviewOutput();std::error_code ec;if(output.empty()){setText(gT3kState,L"NAM loaded, but preview output folder is unavailable.");EnableWindow(gT3kPreviewPlay,TRUE);return;}
-    if(!forceRender&&!output.empty()&&fs::exists(output,ec)&&!ec){gT3kPreviewWav=output;PlaySoundW(output.c_str(),nullptr,SND_FILENAME|SND_ASYNC|SND_NODEFAULT);EnableWindow(gT3kPreviewStop,TRUE);setText(gT3kState,L"Preview playing: Power - Guitar.wav through the loaded NAM.");return;}
-    const fs::path input=tone3000PreviewSource();if(input.empty()||!fs::exists(input,ec)||ec){setText(gT3kState,L"NAM loaded. Preview unavailable: place Power - Guitar.wav next to NamToClo.exe.");EnableWindow(gT3kPreviewPlay,TRUE);return;}
-    gT3kPreviewBusy=true;EnableWindow(gT3kPreviewPlay,FALSE);setText(gT3kState,L"Rendering NAM preview from Power - Guitar.wav...");
-    const fs::path nam=gT3kPreviewNam;std::thread([hwnd,nam,input,output]{auto* m=new T3kPreviewMessage;m->wav=output;m->ok=ntc::renderNamPreviewToWav(nam,input,output,m->error);PostMessageW(hwnd,WM_APP_T3K_PREVIEW_DONE,0,reinterpret_cast<LPARAM>(m));}).detach();
+void stopT3kPreview(){
+    gT3kPreviewPlayer.stop();
+    if(gT3kPreviewStop) EnableWindow(gT3kPreviewStop,FALSE);
+}
+void startT3kPreview(HWND hwnd,bool forceLoad){
+    if(gT3kPreviewBusy||gT3kPreviewNam.empty()) return;
+    const fs::path input=tone3000PreviewSource();
+    std::error_code ec;
+    if(input.empty()||!fs::exists(input,ec)||ec){
+        setText(gT3kState,L"NAM loaded. Preview unavailable: place Power - Guitar.wav next to NamToClo.exe.");
+        EnableWindow(gT3kPreviewPlay,TRUE);
+        return;
+    }
+    if(!forceLoad && gT3kPreviewPlayer.ready()){
+        std::string error;
+        if(gT3kPreviewPlayer.play(error)){
+            EnableWindow(gT3kPreviewStop,TRUE);
+            setText(gT3kState,L"Real-time NAM preview playing.");
+        }else{
+            setText(gT3kState,L"Preview failed: "+wideFromUtf8(error));
+        }
+        return;
+    }
+    gT3kPreviewBusy=true;
+    EnableWindow(gT3kPreviewPlay,FALSE);
+    EnableWindow(gT3kPreviewStop,FALSE);
+    setText(gT3kState,L"Loading NAM and Power - Guitar.wav for real-time preview...");
+    const fs::path nam=gT3kPreviewNam;
+    std::thread([hwnd,nam,input]{
+        auto* m=new T3kPreviewMessage;
+        m->ok=gT3kPreviewPlayer.load(nam,input,m->error);
+        if(m->ok){
+            m->sampleRate=gT3kPreviewPlayer.sampleRate();
+            m->playing=gT3kPreviewPlayer.play(m->error);
+            if(!m->playing) m->ok=false;
+        }
+        PostMessageW(hwnd,WM_APP_T3K_PREVIEW_DONE,0,reinterpret_cast<LPARAM>(m));
+    }).detach();
 }
 
 void refreshUploaderDetection() {
@@ -1230,7 +1261,7 @@ void createUi(HWND hwnd) {
     gT3kModels = CreateWindowW(L"COMBOBOX",L"",WS_CHILD|CBS_DROPDOWNLIST|WS_VSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_MODELS),nullptr,nullptr); applyFont(gT3kModels);
     gT3kUse = CreateWindowW(L"BUTTON",L"Load selected NAM",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_USE),nullptr,nullptr); applyFont(gT3kUse);
     gT3kState = CreateWindowW(L"STATIC",L"Not connected.",WS_CHILD,0,0,0,0,hwnd,controlId(IDC_T3K_STATE),nullptr,nullptr); applyFont(gT3kState);
-    createSectionLabel(hwnd, 1024, L"NAM preview: Power - Guitar.wav");
+    createSectionLabel(hwnd, 1024, L"Real-time NAM preview: Power - Guitar.wav");
     gT3kPreviewPlay = CreateWindowW(L"BUTTON",L"Replay preview",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_PREVIEW_PLAY),nullptr,nullptr); applyFont(gT3kPreviewPlay); EnableWindow(gT3kPreviewPlay,FALSE);
     gT3kPreviewStop = CreateWindowW(L"BUTTON",L"Stop",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_PREVIEW_STOP),nullptr,nullptr); applyFont(gT3kPreviewStop); EnableWindow(gT3kPreviewStop,FALSE);
     const auto savedT3kKey = loadSavedT3kKey();
@@ -1658,14 +1689,20 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     case WM_APP_T3K_DOWNLOAD_DONE: {
         std::unique_ptr<T3kDownloadMessage> m(reinterpret_cast<T3kDownloadMessage*>(lParam));
-        if(m && m->ok){ saveT3kRefreshToken(gT3kClient.refreshToken()); setSingleNam(m->path); gT3kPreviewNam=m->path; gT3kPreviewWav.clear(); EnableWindow(gT3kPreviewPlay,FALSE); stopT3kPreview(); setText(gStatus,L"Tone3000 NAM downloaded and loaded into the converter."); startT3kPreview(hwnd,true); }
+        if(m && m->ok){ saveT3kRefreshToken(gT3kClient.refreshToken()); setSingleNam(m->path); gT3kPreviewNam=m->path; EnableWindow(gT3kPreviewPlay,FALSE); stopT3kPreview(); setText(gStatus,L"Tone3000 NAM downloaded and loaded into the converter."); startT3kPreview(hwnd,true); }
         else if(m){ auto e=wideFromUtf8(m->error); setText(gT3kState,L"Download failed: "+e); MessageBoxW(hwnd,e.c_str(),L"Tone3000",MB_OK|MB_ICONWARNING); }
         setT3kBusy(false); return 0;
     }
     case WM_APP_T3K_PREVIEW_DONE: {
-        std::unique_ptr<T3kPreviewMessage> m(reinterpret_cast<T3kPreviewMessage*>(lParam));gT3kPreviewBusy=false;EnableWindow(gT3kPreviewPlay,TRUE);
-        if(m && m->ok){gT3kPreviewWav=m->wav;PlaySoundW(m->wav.c_str(),nullptr,SND_FILENAME|SND_ASYNC|SND_NODEFAULT);EnableWindow(gT3kPreviewStop,TRUE);setText(gT3kState,L"Preview playing: Power - Guitar.wav through the loaded NAM.");}
-        else if(m){setText(gT3kState,L"NAM loaded, but preview failed: "+wideFromUtf8(m->error));}
+        std::unique_ptr<T3kPreviewMessage> m(reinterpret_cast<T3kPreviewMessage*>(lParam));
+        gT3kPreviewBusy=false;
+        EnableWindow(gT3kPreviewPlay,TRUE);
+        if(m && m->ok && m->playing){
+            EnableWindow(gT3kPreviewStop,TRUE);
+            setText(gT3kState,L"Real-time preview playing at "+std::to_wstring(m->sampleRate)+L" Hz through the loaded NAM.");
+        } else if(m){
+            setText(gT3kState,L"NAM loaded, but real-time preview failed: "+wideFromUtf8(m->error));
+        }
         return 0;
     }
     case WM_APP_UPLOAD_PROGRESS: {
@@ -1775,7 +1812,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         DestroyWindow(hwnd); return 0;
     case WM_DESTROY:
-        PlaySoundW(nullptr,nullptr,0);
+        gT3kPreviewPlayer.stop();
         destroyResources();
         PostQuitMessage(0); return 0;
     }

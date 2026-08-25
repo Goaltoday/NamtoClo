@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(NamToClo VERSION 2.8.9 LANGUAGES C CXX RC)
+project(NamToClo VERSION 2.9.0 LANGUAGES C CXX RC)
 
 if(NOT WIN32)
     message(FATAL_ERROR "NAM to CLO targets Windows x64.")
@@ -33,12 +33,15 @@ add_executable(NamToClo WIN32
     src/gp5_midi.hpp
     src/tone3000_client.cpp
     src/tone3000_client.hpp
+    src/nam_preview_player.cpp
+    src/nam_preview_player.hpp
     src/resources.rc
     src/resource.h
 )
 
 target_compile_features(NamToClo PRIVATE cxx_std_20)
 target_compile_definitions(NamToClo PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+# winmm also provides the v2.9.0 block-streamed real-time NAM preview output.
 target_link_libraries(NamToClo PRIVATE comdlg32 shell32 ole32 dbghelp advapi32 comctl32 winmm winhttp bcrypt ws2_32 crypt32)
 
 if(NAM_CORE_SOURCE_DIR)
