@@ -1701,7 +1701,7 @@ bool writeMonoPcm16Wav(const fs::path& path,const std::vector<float>& samples,st
 } // namespace
 
 bool renderNamPreviewToWav(const fs::path& inputNam,const fs::path& inputWav,const fs::path& outputWav,std::string& error){
-    error.clear();std::error_code ec;if(!fs::exists(inputNam,ec)||ec){error="Preview NAM does not exist.";return false;}if(!fs::exists(inputWav,ec)||ec){error="Missing Power - Guitar.wav next to NamToClo.exe.";return false;}
+    error.clear();std::error_code ec;if(!fs::exists(inputNam,ec)||ec){error="Preview NAM does not exist.";return false;}if(!fs::exists(inputWav,ec)||ec){error="Selected preview WAV does not exist.";return false;}
     std::vector<float> source;std::uint32_t sourceRate=0;if(!readPreviewWavMono(inputWav,source,sourceRate,error))return false;
     const fs::path work=outputWav.parent_path()/(L".preview_model_"+inputNam.stem().wstring());fs::remove_all(work,ec);fs::create_directories(work,ec);if(ec){error="Cannot create preview work directory.";return false;}
     fs::path modelPath;if(!prepareFullA2(inputNam,work,modelPath,error)){fs::remove_all(work,ec);return false;}

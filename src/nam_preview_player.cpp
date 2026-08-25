@@ -57,7 +57,7 @@ bool readWavMono(const fs::path& path,
     in.read(riff, 12);
     if (in.gcount() != 12 || std::memcmp(riff, "RIFF", 4) != 0 ||
         std::memcmp(riff + 8, "WAVE", 4) != 0) {
-        error = "Power - Guitar.wav is not a RIFF/WAVE file.";
+        error = "Selected preview file is not a RIFF/WAVE file.";
         return false;
     }
 
@@ -101,6 +101,10 @@ bool readWavMono(const fs::path& path,
     if ((format != 1 && format != 3) || channels == 0 || sampleRate == 0 ||
         blockAlign == 0 || data.empty()) {
         error = "Preview WAV must be PCM or IEEE-float audio.";
+        return false;
+    }
+    if (channels != 1) {
+        error = "Preview WAV must be mono (1 channel).";
         return false;
     }
 
@@ -528,7 +532,7 @@ bool NamPreviewPlayer::load(const fs::path& namPath,
         return false;
     }
     if (!fs::exists(sourceWav, ec) || ec) {
-        error = "Missing Power - Guitar.wav next to NamToClo.exe.";
+        error = "Selected preview WAV does not exist.";
         return false;
     }
 
