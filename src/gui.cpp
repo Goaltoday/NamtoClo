@@ -24,6 +24,8 @@
 #include <thread>
 #include <vector>
 #include <mutex>
+#include <set>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -436,6 +438,105 @@ void clearSavedT3kRefreshToken() {
     }
 }
 
+
+fs::path tone3000ModelsDirectory() {
+    wchar_t local[MAX_PATH]{};
+    if (SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, local) != S_OK) return {};
+    return fs::path(local) / L"NamToClo" / L"Tone3000" / L"models";
+}
+
+std::wstring normalizedT3kNamPath(const fs::path& path) {
+    std::error_code ec;
+    fs::path p = fs::absolute(path, ec);
+    if (ec) p = path;
+    std::wstring value = p.lexically_normal().wstring();
+    std::transform(value.begin(), value.end(), value.begin(), [](wchar_t c) {
+        return static_cast<wchar_t>(std::towlower(c));
+    });
+    return value;
+}
+
+std::set<std::wstring> loadPendingT3kNams() {
+    std::set<std::wstring> result;
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\NamToClo", 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS) return result;
+    DWORD type = 0, bytes = 0;
+    if (RegQueryValueExW(hKey, L"Tone3000PendingNams", nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS ||
+        type != REG_SZ || bytes < sizeof(wchar_t)) {
+        RegCloseKey(hKey);
+        return result;
+    }
+    std::vector<wchar_t> buffer(bytes / sizeof(wchar_t) + 1, L'\0');
+    if (RegQueryValueExW(hKey, L"Tone3000PendingNams", nullptr, nullptr,
+                         reinterpret_cast<BYTE*>(buffer.data()), &bytes) != ERROR_SUCCESS) {
+        RegCloseKey(hKey);
+        return result;
+    }
+    RegCloseKey(hKey);
+    std::wistringstream input(buffer.data());
+    std::wstring line;
+    while (std::getline(input, line)) {
+        if (!line.empty()) result.insert(line);
+    }
+    return result;
+}
+
+void savePendingT3kNams(const std::set<std::wstring>& paths) {
+    std::wstring value;
+    for (const auto& path : paths) {
+        if (!value.empty()) value += L'\n';
+        value += path;
+    }
+    HKEY hKey = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\NamToClo", 0, nullptr, 0, KEY_SET_VALUE,
+                        nullptr, &hKey, nullptr) != ERROR_SUCCESS) return;
+    if (value.empty()) {
+        RegDeleteValueW(hKey, L"Tone3000PendingNams");
+    } else {
+        const DWORD bytes = static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t));
+        RegSetValueExW(hKey, L"Tone3000PendingNams", 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(value.c_str()), bytes);
+    }
+    RegCloseKey(hKey);
+}
+
+bool isTone3000DownloadedNam(const fs::path& path) {
+    if (path.empty()) return false;
+    std::wstring ext = path.extension().wstring();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t c) {
+        return static_cast<wchar_t>(std::towlower(c));
+    });
+    if (ext != L".nam") return false;
+    const fs::path dir = tone3000ModelsDirectory();
+    if (dir.empty()) return false;
+    return normalizedT3kNamPath(path.parent_path()) == normalizedT3kNamPath(dir);
+}
+
+void registerTemporaryT3kNam(const fs::path& namPath) {
+    if (!isTone3000DownloadedNam(namPath)) return;
+    auto pending = loadPendingT3kNams();
+    pending.insert(normalizedT3kNamPath(namPath));
+    savePendingT3kNams(pending);
+}
+
+void preserveConvertedT3kNam(const fs::path& namPath) {
+    if (!isTone3000DownloadedNam(namPath)) return;
+    auto pending = loadPendingT3kNams();
+    pending.erase(normalizedT3kNamPath(namPath));
+    savePendingT3kNams(pending);
+}
+
+void cleanupUnconvertedT3kNams() {
+    auto pending = loadPendingT3kNams();
+    for (const auto& value : pending) {
+        const fs::path p(value);
+        if (!isTone3000DownloadedNam(p)) continue;
+        std::error_code ec;
+        fs::remove(p, ec);
+    }
+    savePendingT3kNams({});
+}
+
 void syncT3kConnectButton() {
     if (gT3kConnect) setText(gT3kConnect, gT3kClient.connected() ? L"Disconnect" : L"Connect");
 }
@@ -577,8 +678,7 @@ void startT3kDownload(HWND hwnd) {
     if(gT3kBusy) return;
     int sel=static_cast<int>(SendMessageW(gT3kModels,CB_GETCURSEL,0,0)); if(sel<0||sel>=static_cast<int>(gT3kModelItems.size())) return;
     const auto model=gT3kModelItems[static_cast<size_t>(sel)];
-    wchar_t local[MAX_PATH]{}; SHGetFolderPathW(nullptr,CSIDL_LOCAL_APPDATA,nullptr,SHGFP_TYPE_CURRENT,local);
-    fs::path dir=fs::path(local)/L"NamToClo"/L"Tone3000"/L"models";
+    fs::path dir=tone3000ModelsDirectory();
     fs::path dest=dir/(safeTone3000FileStem(model.name)+L".nam");
     setT3kBusy(true); setText(gT3kState,L"Downloading selected NAM...");
     std::thread([hwnd,model,dest]{ auto* m=new T3kDownloadMessage; m->path=dest; m->ok=gT3kClient.downloadModel(model,dest,m->error); PostMessageW(hwnd,WM_APP_T3K_DOWNLOAD_DONE,0,reinterpret_cast<LPARAM>(m)); }).detach();
@@ -1771,7 +1871,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     case WM_APP_T3K_DOWNLOAD_DONE: {
         std::unique_ptr<T3kDownloadMessage> m(reinterpret_cast<T3kDownloadMessage*>(lParam));
-        if(m && m->ok){ saveT3kRefreshToken(gT3kClient.refreshToken()); setSingleNam(m->path); gT3kPreviewNam=m->path; EnableWindow(gT3kPreviewPlay,FALSE); stopT3kPreview(); setText(gStatus,L"Tone3000 NAM downloaded and loaded into the converter."); startT3kPreview(hwnd,true); }
+        if(m && m->ok){ saveT3kRefreshToken(gT3kClient.refreshToken()); registerTemporaryT3kNam(m->path); setSingleNam(m->path); gT3kPreviewNam=m->path; EnableWindow(gT3kPreviewPlay,FALSE); stopT3kPreview(); setText(gStatus,L"Tone3000 NAM downloaded and loaded into the converter."); startT3kPreview(hwnd,true); }
         else if(m){ auto e=wideFromUtf8(m->error); setText(gT3kState,L"Download failed: "+e); MessageBoxW(hwnd,e.c_str(),L"Tone3000",MB_OK|MB_ICONWARNING); }
         setT3kBusy(false); return 0;
     }
@@ -1849,6 +1949,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         updateBackendUi();
         updateTailControls();
         if (r && r->ok) {
+            preserveConvertedT3kNam(r->inputNam);
             const std::wstring resultMessage = L"Conversion complete.\r\n\r\nGP-200 CLO 1024:\r\n" + r->gp2001024.wstring();
             setText(gStatus, L"Done. CLO file generated successfully.");
             const std::wstring doneTitle = L"NAM to CLO";
@@ -1869,6 +1970,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             setText(gStatus, L"Batch conversion did not find any NAM files.");
             MessageBoxW(hwnd, L"No .nam files were found in the selected folder.", L"Batch conversion", MB_ICONINFORMATION | MB_OK);
             return 0;
+        }
+
+        for (const auto& item : r->items) {
+            if (item.ok) preserveConvertedT3kNam(item.inputNam);
         }
 
         std::wstring resultMessage = L"Batch conversion complete.\r\n\r\nProcessed: " + std::to_wstring(r->total)
@@ -1895,6 +2000,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         DestroyWindow(hwnd); return 0;
     case WM_DESTROY:
         gT3kPreviewPlayer.stop();
+        if (!gBusy) cleanupUnconvertedT3kNams();
         destroyResources();
         PostQuitMessage(0); return 0;
     }
@@ -1906,6 +2012,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     // Prevent Windows DPI virtualization from inflating the whole window on 125%/150% displays.
     SetProcessDPIAware();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    // Remove Tone3000 downloads that were never successfully converted.
+    // Only downloads registered as temporary by this version are cleaned; older cache files are left untouched.
+    cleanupUnconvertedT3kNams();
     INITCOMMONCONTROLSEX icc{};
     icc.dwSize = sizeof(icc);
     icc.dwICC = ICC_TAB_CLASSES | ICC_PROGRESS_CLASS;

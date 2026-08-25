@@ -447,3 +447,7 @@ Tone3000 models are stored using the model's human-readable name instead of the 
 ## Tone3000 UI status fix (v2.9.4)
 
 The Tone3000 status line is now painted with an opaque card background and forced to one line, preventing previous status messages from accumulating visually above the Preview WAV row.
+
+
+### Tone3000 temporary NAM cleanup (v2.9.5)
+Each NAM downloaded from Tone3000 is registered as temporary. If a CLO conversion of that NAM succeeds, it is removed from the temporary list and the NAM is kept. At normal shutdown, and again on the next startup after an interrupted session, only registered downloads that were never successfully converted are deleted. Generated `.clo` files, successfully converted Tone3000 NAMs, manually opened NAMs, and cache files created by older versions are not deleted.
