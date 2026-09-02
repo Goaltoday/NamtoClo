@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <complex>
 #include <cmath>
 #include <cctype>
 #include <cstdlib>
@@ -39,6 +40,107 @@ std::uint32_t le32(const std::uint8_t* p) {
            (static_cast<std::uint32_t>(p[2]) << 16) |
            (static_cast<std::uint32_t>(p[3]) << 24);
 }
+
+
+void previewFft(std::vector<std::complex<float>>& a, bool inverse) {
+    const std::size_t n = a.size();
+    for (std::size_t i = 1, j = 0; i < n; ++i) {
+        std::size_t bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) std::swap(a[i], a[j]);
+    }
+    constexpr float kPi = 3.14159265358979323846f;
+    for (std::size_t len = 2; len <= n; len <<= 1) {
+        const float ang = (inverse ? 2.0f : -2.0f) * kPi / static_cast<float>(len);
+        const std::complex<float> wlen(std::cos(ang), std::sin(ang));
+        for (std::size_t i = 0; i < n; i += len) {
+            std::complex<float> w(1.0f, 0.0f);
+            for (std::size_t j = 0; j < len / 2; ++j) {
+                const auto u = a[i + j];
+                const auto v = a[i + j + len / 2] * w;
+                a[i + j] = u + v;
+                a[i + j + len / 2] = u - v;
+                w *= wlen;
+            }
+        }
+    }
+    if (inverse) {
+        const float scale = 1.0f / static_cast<float>(n);
+        for (auto& v : a) v *= scale;
+    }
+}
+
+// Uniform partitioned convolution for the preview cabinet IR. The old preview
+// path performed a full time-domain FIR dot product for every single sample,
+// which can starve waveOut when an IR contains thousands of taps. Keeping the
+// partition size equal to the NAM block size makes CPU cost predictable and
+// independent of the individual IR tap count per sample.
+class PreviewPartitionedConvolver {
+public:
+    explicit PreviewPartitionedConvolver(const std::vector<float>& ir,
+                                          std::size_t blockSize)
+        : blockSize_(blockSize), fftSize_(blockSize * 2u), overlap_(blockSize, 0.0f) {
+        if (ir.empty() || blockSize_ == 0) return;
+        const std::size_t partitions = (ir.size() + blockSize_ - 1u) / blockSize_;
+        h_.assign(partitions, std::vector<std::complex<float>>(fftSize_));
+        xHistory_.assign(partitions, std::vector<std::complex<float>>(fftSize_));
+        for (std::size_t p = 0; p < partitions; ++p) {
+            auto& hp = h_[p];
+            const std::size_t base = p * blockSize_;
+            const std::size_t count = std::min(blockSize_, ir.size() - base);
+            for (std::size_t i = 0; i < count; ++i)
+                hp[i] = std::complex<float>(ir[base + i], 0.0f);
+            previewFft(hp, false);
+        }
+        work_.resize(fftSize_);
+        sum_.resize(fftSize_);
+    }
+
+    bool active() const { return !h_.empty(); }
+
+    void process(const float* input, float* output, std::size_t count) {
+        if (!active()) {
+            std::copy(input, input + count, output);
+            return;
+        }
+        std::fill(work_.begin(), work_.end(), std::complex<float>{});
+        for (std::size_t i = 0; i < count; ++i)
+            work_[i] = std::complex<float>(input[i], 0.0f);
+        previewFft(work_, false);
+
+        xHistory_[head_] = work_;
+        std::fill(sum_.begin(), sum_.end(), std::complex<float>{});
+        const std::size_t partitions = h_.size();
+        for (std::size_t p = 0; p < partitions; ++p) {
+            const std::size_t xIndex = (head_ + partitions - p) % partitions;
+            const auto& x = xHistory_[xIndex];
+            const auto& h = h_[p];
+            for (std::size_t k = 0; k < fftSize_; ++k)
+                sum_[k] += x[k] * h[k];
+        }
+        previewFft(sum_, true);
+
+        for (std::size_t i = 0; i < count; ++i)
+            output[i] = sum_[i].real() + overlap_[i];
+        for (std::size_t i = count; i < blockSize_; ++i)
+            output[i] = 0.0f;
+        for (std::size_t i = 0; i < blockSize_; ++i)
+            overlap_[i] = sum_[blockSize_ + i].real();
+
+        head_ = (head_ + 1u) % partitions;
+    }
+
+private:
+    std::size_t blockSize_ = 0;
+    std::size_t fftSize_ = 0;
+    std::size_t head_ = 0;
+    std::vector<std::vector<std::complex<float>>> h_;
+    std::vector<std::vector<std::complex<float>>> xHistory_;
+    std::vector<std::complex<float>> work_;
+    std::vector<std::complex<float>> sum_;
+    std::vector<float> overlap_;
+};
 
 bool readWavMono(const fs::path& path,
                  std::vector<float>& mono,
@@ -443,25 +545,14 @@ struct NamPreviewPlayer::Impl {
         NAM_SAMPLE* inputs[1] = { input.data() };
         NAM_SAMPLE* outputs[1] = { output.data() };
 
-        // Optional cabinet IR. Both NAM processing and the IR path run at
-        // 48 kHz, so the IR is resampled only once during load() when needed.
-        std::vector<float> firDelay(localIr ? localIr->size() : 0u, 0.0f);
-        std::size_t firWrite = 0;
-        auto processIr = [&](float x) -> float {
-            if (!localIr || localIr->empty()) return x;
-            const std::size_t n = localIr->size();
-            firDelay[firWrite] = x;
-            double y = 0.0;
-            // Split the circular FIR into two contiguous ranges to avoid a
-            // modulo operation for every tap.
-            std::size_t k = 0;
-            for (; k <= firWrite; ++k)
-                y += static_cast<double>((*localIr)[k]) * firDelay[firWrite - k];
-            for (; k < n; ++k)
-                y += static_cast<double>((*localIr)[k]) * firDelay[n + firWrite - k];
-            if (++firWrite == n) firWrite = 0;
-            return std::isfinite(y) ? static_cast<float>(y) : 0.0f;
-        };
+        // Optional cabinet IR. Use uniform partitioned FFT convolution rather
+        // than a per-sample O(N) FIR, so long cabinet IRs cannot consume the
+        // whole waveOut scheduling margin and cause audible drop-outs.
+        PreviewPartitionedConvolver irConvolver(
+            (localIr && !localIr->empty()) ? *localIr : std::vector<float>{},
+            static_cast<std::size_t>(kFramesPerBuffer));
+        std::array<float, kFramesPerBuffer> irInput{};
+        std::array<float, kFramesPerBuffer> irOutput{};
 
         std::size_t pos = 0;
         std::size_t queued = 0;
@@ -480,8 +571,16 @@ struct NamPreviewPlayer::Impl {
             }
             for (int s = 0; s < n; ++s) {
                 float v = static_cast<float>(output[static_cast<std::size_t>(s)]);
+                irInput[static_cast<std::size_t>(s)] = std::isfinite(v) ? v : 0.0f;
+            }
+            if (irConvolver.active()) {
+                irConvolver.process(irInput.data(), irOutput.data(), static_cast<std::size_t>(n));
+            } else {
+                std::copy_n(irInput.data(), static_cast<std::size_t>(n), irOutput.data());
+            }
+            for (int s = 0; s < n; ++s) {
+                float v = irOutput[static_cast<std::size_t>(s)];
                 if (!std::isfinite(v)) v = 0.0f;
-                v = processIr(v);
                 v = std::clamp(v, -1.0f, 1.0f);
                 const auto sample = static_cast<std::int16_t>(std::lrint(v * 32767.0f));
                 pcm[i][static_cast<std::size_t>(s) * 2u] = sample;

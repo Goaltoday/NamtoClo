@@ -472,3 +472,7 @@ The realtime preview IR interface is synchronized between `nam_preview_player.hp
 
 ### v2.9.10 build compatibility fix
 The modified-files package now includes `src/gui.cpp`, keeping the Tone3000 IR preview UI in sync with `nam_preview_player.hpp/.cpp`. A backward-compatible 3-argument `NamPreviewPlayer::load()` overload is also provided so older GUI call sites compile and simply preview without an IR.
+
+
+### Tone3000 IR preview performance (v2.9.11)
+The optional cabinet IR in Tone3000 preview now uses uniform partitioned FFT convolution with 1024-sample partitions instead of a full per-sample FIR dot product. This substantially reduces CPU spikes with long IRs and prevents waveOut buffer underruns/stuttering while keeping the IR path at 48 kHz.
