@@ -451,3 +451,7 @@ The Tone3000 status line is now painted with an opaque card background and force
 
 ### Tone3000 temporary NAM cleanup (v2.9.5)
 Each NAM downloaded from Tone3000 is registered as temporary. If a CLO conversion of that NAM succeeds, it is removed from the temporary list and the NAM is kept. At normal shutdown, and again on the next startup after an interrupted session, only registered downloads that were never successfully converted are deleted. Generated `.clo` files, successfully converted Tone3000 NAMs, manually opened NAMs, and cache files created by older versions are not deleted.
+
+## v2.9.6
+- GP-5 uploader UI now identifies itself as GP-5/GP-50 and MIDI detection explicitly accepts `gp-5`, `gp5`, `gp-50`, and `gp50`, while keeping the existing shared upload protocol unchanged.
+- Tone Match is now always enabled for conversions. The UI only selects between the built-in/default reference audio path and a custom WAV reference. Custom WAV keeps the existing first-20-seconds behavior.

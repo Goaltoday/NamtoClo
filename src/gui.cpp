@@ -64,6 +64,7 @@ constexpr int IDC_BROWSE_CORRECTIVE_IR = 120;
 constexpr int IDC_REFINE_CLO = 121;
 constexpr int IDC_REFINE_TARGET_PATH = 122;
 constexpr int IDC_BROWSE_REFINE_TARGET = 123;
+constexpr int IDC_REFINE_SOURCE = 155;
 constexpr int IDC_BACKEND_TABS = 124;
 constexpr int IDC_UPLOADER_CLO_PATH = 125;
 constexpr int IDC_UPLOADER_BROWSE = 126;
@@ -181,7 +182,7 @@ HWND gBrowseRecordedButton = nullptr;
 HWND gCorrectiveCheck = nullptr;
 HWND gCorrectiveEdit = nullptr;
 HWND gBrowseCorrectiveButton = nullptr;
-HWND gRefineCheck = nullptr;
+HWND gRefineSourceCombo = nullptr;
 HWND gRefineTargetEdit = nullptr;
 HWND gBrowseRefineTargetButton = nullptr;
 HWND gVersion = nullptr;
@@ -303,7 +304,7 @@ void showConversionUi(HWND hwnd, bool show) {
     const HWND controls[] = {
         gInputEdit, gOutEdit, gLoadFileButton, gLoadFolderButton, gBrowseButton,
         gConvertButton, gOpenButton, gTailCombo, gRecordedEdit, gBrowseRecordedButton,
-        gCorrectiveCheck, gCorrectiveEdit, gBrowseCorrectiveButton, gRefineCheck,
+        gCorrectiveCheck, gCorrectiveEdit, gBrowseCorrectiveButton, gRefineSourceCombo,
         gRefineTargetEdit, gBrowseRefineTargetButton, gInfo
     };
     for (HWND h : controls) showControl(h, show);
@@ -789,14 +790,14 @@ void updateBackendUi() {
         refreshUploaderDetection();
         if (!gUploadBusy) setText(gStatus, L"GP-200 Uploader ready.");
     } else if (gp5) {
-        setText(gSubtitle, L"Adapt a CLO to the GP-5 A128/B512 transfer format and upload it to SnapTone 51-80.");
+        setText(gSubtitle, L"Adapt a CLO to the GP-5/GP-50 A128/B512 transfer format and upload it to SnapTone 51-80.");
         refreshGp5Detection();
-        if (!gGp5UploadBusy) setText(gStatus, L"GP-5 Uploader ready.");
+        if (!gGp5UploadBusy) setText(gStatus, L"GP-5/GP-50 Uploader ready.");
     } else {
         setText(gSubtitle, L"Convert one NAM or batch-convert every NAM in a selected folder.");
         setText(gInfo,
             L"Place nam_input_wav.wav next to NamToClo.exe. The original stimulus is always used.\r\n"
-            L"Tail / Reamp, Corrective IR and Tone Match are optional.");
+            L"Tail / Reamp and Corrective IR are optional. Tone Match is applied by default.");
         if (!gBusy) setText(gStatus, L"Ready to convert.");
     }
     if (hwnd) InvalidateRect(hwnd, nullptr, TRUE);
@@ -812,7 +813,7 @@ void enableControls(bool enable) {
     EnableWindow(gOpenButton, enable);
     EnableWindow(gTailCombo, enable);
     EnableWindow(gCorrectiveCheck, enable);
-    EnableWindow(gRefineCheck, enable);
+    EnableWindow(gRefineSourceCombo, enable);
     if (!enable) {
         EnableWindow(gRefineTargetEdit, FALSE);
         EnableWindow(gBrowseRefineTargetButton, FALSE);
@@ -978,10 +979,10 @@ void updateTailControls() {
     EnableWindow(gCorrectiveEdit, correctiveEnabled ? TRUE : FALSE);
     EnableWindow(gBrowseCorrectiveButton, correctiveEnabled ? TRUE : FALSE);
 
-    EnableWindow(gRefineCheck, TRUE);
-    const bool refineEnabled = SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    EnableWindow(gRefineTargetEdit, refineEnabled ? TRUE : FALSE);
-    EnableWindow(gBrowseRefineTargetButton, refineEnabled ? TRUE : FALSE);
+    EnableWindow(gRefineSourceCombo, TRUE);
+    const bool customToneMatch = SendMessageW(gRefineSourceCombo, CB_GETCURSEL, 0, 0) == 1;
+    EnableWindow(gRefineTargetEdit, customToneMatch ? TRUE : FALSE);
+    EnableWindow(gBrowseRefineTargetButton, customToneMatch ? TRUE : FALSE);
 }
 
 void postStatus(HWND hwnd, const std::wstring& s) {
@@ -1020,9 +1021,14 @@ void startConversion(HWND hwnd) {
     }
 
     ntc::CloRefineConfig refine;
-    refine.enabled = SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    refine.enabled = true;
     refine.passes = 4;
-    refine.referenceWav = fs::path(getText(gRefineTargetEdit));
+    const bool customToneMatch = SendMessageW(gRefineSourceCombo, CB_GETCURSEL, 0, 0) == 1;
+    refine.referenceWav = customToneMatch ? fs::path(getText(gRefineTargetEdit)) : fs::path{};
+    if (customToneMatch && refine.referenceWav.empty()) {
+        MessageBoxW(hwnd, L"Select a custom Tone Match reference WAV file.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
+        return;
+    }
 
     enableControls(false);
     ntc::NativeConverterConfig nativeConfig;
@@ -1125,7 +1131,7 @@ void chooseGp5Clo(HWND hwnd) {
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
     if (GetOpenFileNameW(&ofn)) {
         setText(gGp5CloEdit, file);
-        setText(gStatus, L"CLO selected. Choose SnapTone 51-80 and press Upload to GP-5.");
+        setText(gStatus, L"CLO selected. Choose SnapTone 51-80 and press Upload to GP-5/GP-50.");
     }
 }
 
@@ -1133,12 +1139,12 @@ void startGp5Uploader(HWND hwnd) {
     if (gGp5UploadBusy) return;
     const std::wstring clo = getText(gGp5CloEdit);
     if (clo.empty()) {
-        MessageBoxW(hwnd, L"Select a .clo file first.", L"GP-5 Uploader", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(hwnd, L"Select a .clo file first.", L"GP-5/GP-50 Uploader", MB_OK | MB_ICONINFORMATION);
         return;
     }
     const int selection = static_cast<int>(SendMessageW(gGp5SlotCombo, CB_GETCURSEL, 0, 0));
     if (selection < 0 || selection >= 30) {
-        MessageBoxW(hwnd, L"Select a destination SnapTone slot (51-80).", L"GP-5 Uploader", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(hwnd, L"Select a destination SnapTone slot (51-80).", L"GP-5/GP-50 Uploader", MB_OK | MB_ICONINFORMATION);
         return;
     }
     // The combo contains visible SnapTone 51..80, while the GP-5 protocol
@@ -1149,7 +1155,7 @@ void startGp5Uploader(HWND hwnd) {
     if (!d.inputFound || !d.outputFound) {
         const auto msg = ntc::gp5::describeDetection(d);
         setText(gGp5Device, msg);
-        MessageBoxW(hwnd, msg.c_str(), L"GP-5 Uploader", MB_OK | MB_ICONWARNING);
+        MessageBoxW(hwnd, msg.c_str(), L"GP-5/GP-50 Uploader", MB_OK | MB_ICONWARNING);
         return;
     }
 
@@ -1161,7 +1167,7 @@ void startGp5Uploader(HWND hwnd) {
     EnableWindow(gGp5UploadButton, FALSE);
     SendMessageW(gGp5Progress, PBM_SETRANGE32, 0, 146);
     SendMessageW(gGp5Progress, PBM_SETPOS, 0, 0);
-    setText(gStatus, L"Preparing GP-5 A128/B512 transfer...");
+    setText(gStatus, L"Preparing GP-5/GP-50 A128/B512 transfer...");
 
     std::thread([hwnd, clo, slot] {
         auto result = ntc::gp5::uploadCloToGp5(fs::path(clo), slot,
@@ -1246,7 +1252,7 @@ void layoutControls(HWND hwnd) {
     moveCtrl(gBrowseCorrectiveButton, gUi.sectionCorrective.right - sectionRightInset - 124, gUi.sectionCorrective.top + 27, 124, 32);
 
     moveCtrl(GetDlgItem(hwnd, 1009), contentX, gUi.sectionRefine.top + 7, 360, 22);
-    moveCtrl(gRefineCheck, contentX, gUi.sectionRefine.top + 32, 560, 24);
+    moveCtrl(gRefineSourceCombo, contentX, gUi.sectionRefine.top + 32, 360, 120);
     moveCtrl(GetDlgItem(hwnd, 1010), contentX, gUi.sectionRefine.top + 58, 430, 20);
     const int refineTargetEditW = (gUi.sectionRefine.right - sectionRightInset - 124 - 8) - contentX;
     moveCtrl(gRefineTargetEdit, contentX, gUi.sectionRefine.top + 78, refineTargetEditW, 28);
@@ -1341,7 +1347,7 @@ void createUi(HWND hwnd) {
     TabCtrl_InsertItem(gBackendTabs, 1, &tab);
     tab.pszText = const_cast<LPWSTR>(L"GP-200 Uploader");
     TabCtrl_InsertItem(gBackendTabs, 2, &tab);
-    tab.pszText = const_cast<LPWSTR>(L"GP-5 Uploader");
+    tab.pszText = const_cast<LPWSTR>(L"GP-5/GP-50 Uploader");
     TabCtrl_InsertItem(gBackendTabs, 3, &tab);
     TabCtrl_SetCurSel(gBackendTabs, 0);
 
@@ -1351,7 +1357,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
     createSectionLabel(hwnd, 1008, L"Corrective IR");
     createSectionLabel(hwnd, 1009, L"Tone Match");
-    createSectionLabel(hwnd, 1010, L"Tone Match reference WAV (optional; first 20 s used)");
+    createSectionLabel(hwnd, 1010, L"Custom Tone Match reference WAV (first 20 s used)");
 
     gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                  0, 0, 100, 30, hwnd, controlId(IDC_INPUT_PATH), nullptr, nullptr);
@@ -1395,10 +1401,13 @@ void createUi(HWND hwnd) {
                                              WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                              0, 0, 120, 34, hwnd, controlId(IDC_BROWSE_CORRECTIVE_IR), nullptr, nullptr);
 
-    gRefineCheck = CreateWindowW(L"BUTTON", L"Apply Tone Match (slow)",
-                                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                 0, 0, 520, 24, hwnd, controlId(IDC_REFINE_CLO), nullptr, nullptr);
-    applyFont(gRefineCheck);
+    gRefineSourceCombo = CreateWindowW(L"COMBOBOX", L"",
+                                        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                        0, 0, 520, 120, hwnd, controlId(IDC_REFINE_SOURCE), nullptr, nullptr);
+    applyFont(gRefineSourceCombo);
+    SendMessageW(gRefineSourceCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Reference audio (default)"));
+    SendMessageW(gRefineSourceCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Custom WAV..."));
+    SendMessageW(gRefineSourceCombo, CB_SETCURSEL, 0, 0);
     gRefineTargetEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                         WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                         0, 0, 100, 30, hwnd, controlId(IDC_REFINE_TARGET_PATH), nullptr, nullptr);
@@ -1492,7 +1501,7 @@ void createUi(HWND hwnd) {
         SendMessageW(gGp5SlotCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
     }
     SendMessageW(gGp5SlotCombo, CB_SETCURSEL, 0, 0);
-    gGp5Device = CreateWindowW(L"STATIC", L"GP-5 MIDI not scanned yet.", WS_CHILD,
+    gGp5Device = CreateWindowW(L"STATIC", L"GP-5/GP-50 MIDI not scanned yet.", WS_CHILD,
                                0, 0, 100, 24, hwnd, controlId(IDC_GP5_DEVICE), nullptr, nullptr);
     applyFont(gGp5Device);
     gGp5RescanButton = CreateWindowW(L"BUTTON", L"Rescan", WS_CHILD | BS_OWNERDRAW,
@@ -1502,7 +1511,7 @@ void createUi(HWND hwnd) {
                                    0, 0, 100, 22, hwnd, controlId(IDC_GP5_PROGRESS), nullptr, nullptr);
     SendMessageW(gGp5Progress, PBM_SETRANGE32, 0, 146);
     SendMessageW(gGp5Progress, PBM_SETPOS, 0, 0);
-    gGp5UploadButton = CreateWindowW(L"BUTTON", L"Upload to GP-5", WS_CHILD | BS_OWNERDRAW,
+    gGp5UploadButton = CreateWindowW(L"BUTTON", L"Upload to GP-5/GP-50", WS_CHILD | BS_OWNERDRAW,
                                      0, 0, 240, 38, hwnd, controlId(IDC_GP5_UPLOAD), nullptr, nullptr);
     applyFont(gGp5UploadButton);
 
@@ -1754,8 +1763,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_APPLY_CORRECTIVE_IR:
             if (HIWORD(wParam) == BN_CLICKED) updateTailControls();
             return 0;
-        case IDC_REFINE_CLO:
-            if (HIWORD(wParam) == BN_CLICKED) updateTailControls();
+        case IDC_REFINE_SOURCE:
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                if (SendMessageW(gRefineSourceCombo, CB_GETCURSEL, 0, 0) == 0)
+                    setText(gRefineTargetEdit, L"");
+                updateTailControls();
+            }
             return 0;
         case IDC_TAIL_MODE:
             if (HIWORD(wParam) == CBN_SELCHANGE) updateTailControls();
@@ -1807,7 +1820,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (ext == L".clo") {
                     if (gp5UploaderTabSelected()) {
                         setText(gGp5CloEdit, p.wstring());
-                        setText(gStatus, L"CLO selected. Choose SnapTone 51-80 and press Upload to GP-5.");
+                        setText(gStatus, L"CLO selected. Choose SnapTone 51-80 and press Upload to GP-5/GP-50.");
                     } else {
                         setText(gUploaderCloEdit, p.wstring());
                         setText(gStatus, L"CLO selected. Choose a destination slot and press Upload to GP-200.");
@@ -1815,8 +1828,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 } else {
                     const bool gp5 = gp5UploaderTabSelected();
                     MessageBoxW(hwnd,
-                                gp5 ? L"The GP-5 Uploader accepts .clo files." : L"The GP-200 Uploader accepts .clo files.",
-                                gp5 ? L"GP-5 Uploader" : L"GP-200 Uploader", MB_OK | MB_ICONINFORMATION);
+                                gp5 ? L"The GP-5/GP-50 Uploader accepts .clo files." : L"The GP-200 Uploader accepts .clo files.",
+                                gp5 ? L"GP-5/GP-50 Uploader" : L"GP-200 Uploader", MB_OK | MB_ICONINFORMATION);
                 }
             } else if (fs::is_directory(p, ec) && !ec) setNamFolder(p);
             else setSingleNam(p);
@@ -1936,9 +1949,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             setText(gStatus, r->message);
             if (r->ok) {
                 SendMessageW(gGp5Progress, PBM_SETPOS, 146, 0);
-                MessageBoxW(hwnd, r->message.c_str(), L"GP-5 Uploader", MB_OK | MB_ICONINFORMATION);
+                MessageBoxW(hwnd, r->message.c_str(), L"GP-5/GP-50 Uploader", MB_OK | MB_ICONINFORMATION);
             } else {
-                MessageBoxW(hwnd, r->message.c_str(), L"GP-5 Uploader", MB_OK | MB_ICONERROR);
+                MessageBoxW(hwnd, r->message.c_str(), L"GP-5/GP-50 Uploader", MB_OK | MB_ICONERROR);
             }
         }
         return 0;
