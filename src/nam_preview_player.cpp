@@ -554,6 +554,13 @@ struct NamPreviewPlayer::Impl {
         std::array<float, kFramesPerBuffer> irInput{};
         std::array<float, kFramesPerBuffer> irOutput{};
 
+        // Keep the preview level static. The cabinet IR is attenuated once when
+        // it is loaded (see load()) instead of using a time-varying limiter here.
+        // A fixed extra 6 dB of headroom is applied only when an IR is active.
+        // This avoids limiter pumping and preserves the dynamics of the NAM.
+        constexpr float kPreviewCeiling = 0.999f;
+        constexpr float kIrPreviewGain = 0.5f; // -6.02 dB with cabinet IR
+
         std::size_t pos = 0;
         std::size_t queued = 0;
         std::array<bool, kBufferCount> active{};
@@ -581,7 +588,14 @@ struct NamPreviewPlayer::Impl {
             for (int s = 0; s < n; ++s) {
                 float v = irOutput[static_cast<std::size_t>(s)];
                 if (!std::isfinite(v)) v = 0.0f;
-                v = std::clamp(v, -1.0f, 1.0f);
+
+                if (irConvolver.active())
+                    v *= kIrPreviewGain;
+
+                // Numerical last line of defence only. The IR is pre-attenuated
+                // at load time and the fixed -6 dB preview headroom should keep
+                // normal cabinet IRs comfortably below full scale.
+                v = std::clamp(v, -kPreviewCeiling, kPreviewCeiling);
                 const auto sample = static_cast<std::int16_t>(std::lrint(v * 32767.0f));
                 pcm[i][static_cast<std::size_t>(s) * 2u] = sample;
                 pcm[i][static_cast<std::size_t>(s) * 2u + 1u] = sample;
@@ -685,9 +699,22 @@ bool NamPreviewPlayer::load(const fs::path& namPath,
             error = "Could not resample the cabinet IR to 48000 Hz.";
             return false;
         }
-        // Remove only numerically empty tail samples. No normalization is done:
-        // the IR's original gain remains intact.
+        // Remove numerically empty tail samples first.
         while (ir48.size() > 1 && std::abs(ir48.back()) < 1.0e-9f) ir48.pop_back();
+
+        // Cabinet IR files are not level-standardised. Do not boost quiet IRs,
+        // but attenuate unusually hot ones so their largest coefficient is at
+        // most -6.02 dBFS (0.5). This is a single constant gain applied to the
+        // whole IR, so its frequency response and dynamics are unchanged.
+        float irPeak = 0.0f;
+        for (float v : ir48) {
+            if (std::isfinite(v)) irPeak = std::max(irPeak, std::abs(v));
+        }
+        constexpr float kMaxIrPeak = 0.5f;
+        if (irPeak > kMaxIrPeak && irPeak > 0.0f) {
+            const float scale = kMaxIrPeak / irPeak;
+            for (float& v : ir48) v *= scale;
+        }
     }
 
     const auto base = fs::temp_directory_path(ec);

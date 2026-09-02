@@ -474,5 +474,13 @@ The realtime preview IR interface is synchronized between `nam_preview_player.hp
 The modified-files package now includes `src/gui.cpp`, keeping the Tone3000 IR preview UI in sync with `nam_preview_player.hpp/.cpp`. A backward-compatible 3-argument `NamPreviewPlayer::load()` overload is also provided so older GUI call sites compile and simply preview without an IR.
 
 
-### Tone3000 IR preview performance (v2.9.11)
+### Tone3000 IR preview performance (v2.9.12)
 The optional cabinet IR in Tone3000 preview now uses uniform partitioned FFT convolution with 1024-sample partitions instead of a full per-sample FIR dot product. This substantially reduces CPU spikes with long IRs and prevents waveOut buffer underruns/stuttering while keeping the IR path at 48 kHz.
+
+
+### Tone3000 preview IR safety limiter (v2.9.12)
+Cabinet IR WAVs are not level-standardised. The Tone3000 preview now uses a transparent safety peak limiter (0.97 full-scale ceiling, instant attack and slow release) after the optional 48 kHz cabinet IR and before conversion to the Windows PCM output. This replaces the previous hard clipping at full scale while leaving the IR unnormalised.
+
+
+### Tone3000 preview IR static headroom (v2.9.13)
+The realtime IR preview no longer uses a time-varying peak limiter. Hot cabinet IRs are attenuated once at load time so their largest coefficient does not exceed 0.5 (-6.02 dBFS), without boosting quieter IRs. When an IR is active, the preview path also applies a fixed 0.5 (-6.02 dB) output gain before PCM conversion. Both operations are constant-gain changes, so they preserve the IR frequency response and NAM dynamics while providing predictable headroom. A final 0.999 clamp remains only as a numerical safety guard.
