@@ -468,3 +468,7 @@ The Tone3000 realtime preview now runs on a fixed 48 kHz processing path. Previe
 
 ### v2.9.9 build fix
 The realtime preview IR interface is synchronized between `nam_preview_player.hpp` and `nam_preview_player.cpp`. The modified-files package now includes both files, fixing C2511/C2039 build errors when applying the incremental update over an older tree.
+
+
+### v2.9.10 build compatibility fix
+The modified-files package now includes `src/gui.cpp`, keeping the Tone3000 IR preview UI in sync with `nam_preview_player.hpp/.cpp`. A backward-compatible 3-argument `NamPreviewPlayer::load()` overload is also provided so older GUI call sites compile and simply preview without an IR.

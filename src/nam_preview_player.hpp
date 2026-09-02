@@ -21,6 +21,13 @@ public:
               const std::filesystem::path& irWav,
               std::string& error);
 
+    // Backward-compatible overload: preview without a cabinet IR.
+    bool load(const std::filesystem::path& namPath,
+              const std::filesystem::path& sourceWav,
+              std::string& error) {
+        return load(namPath, sourceWav, std::filesystem::path{}, error);
+    }
+
     // Starts block-by-block realtime playback through the already loaded NAM.
     bool play(std::string& error);
     void stop();

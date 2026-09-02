@@ -96,6 +96,9 @@ constexpr int IDC_T3K_PREVIEW_PLAY = 151;
 constexpr int IDC_T3K_PREVIEW_STOP = 152;
 constexpr int IDC_T3K_PREVIEW_WAV = 153;
 constexpr int IDC_T3K_PREVIEW_BROWSE = 154;
+constexpr int IDC_T3K_IR_WAV = 155;
+constexpr int IDC_T3K_IR_BROWSE = 156;
+constexpr int IDC_T3K_IR_CLEAR = 157;
 
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
@@ -156,8 +159,12 @@ HWND gT3kPreviewPlay = nullptr;
 HWND gT3kPreviewStop = nullptr;
 HWND gT3kPreviewWav = nullptr;
 HWND gT3kPreviewBrowse = nullptr;
+HWND gT3kIrWav = nullptr;
+HWND gT3kIrBrowse = nullptr;
+HWND gT3kIrClear = nullptr;
 fs::path gT3kPreviewNam;
 fs::path gT3kPreviewWavPath;
+fs::path gT3kIrWavPath;
 bool gT3kPreviewBusy = false;
 ntc::NamPreviewPlayer gT3kPreviewPlayer;
 ntc::tone3000::Client gT3kClient;
@@ -338,9 +345,10 @@ bool tone3000TabSelected() {
 
 void showTone3000Ui(HWND hwnd, bool show) {
     const HWND controls[] = { gT3kKey, gT3kConnect, gT3kSearch, gT3kSearchButton,
-        gT3kResults, gT3kModels, gT3kUse, gT3kState, gT3kPrevious, gT3kPageLabel, gT3kNext, gT3kSort, gT3kPreviewWav, gT3kPreviewBrowse, gT3kPreviewPlay, gT3kPreviewStop };
+        gT3kResults, gT3kModels, gT3kUse, gT3kState, gT3kPrevious, gT3kPageLabel, gT3kNext, gT3kSort,
+        gT3kIrWav, gT3kIrBrowse, gT3kIrClear, gT3kPreviewWav, gT3kPreviewBrowse, gT3kPreviewPlay, gT3kPreviewStop };
     for (HWND h : controls) showControl(h, show);
-    for (int id : {1019,1020,1021,1022,1023,1024}) showControl(GetDlgItem(hwnd, id), show);
+    for (int id : {1019,1020,1021,1022,1023,1024,1025}) showControl(GetDlgItem(hwnd, id), show);
 }
 
 struct T3kResultMessage { bool ok=false; std::string error; };
@@ -354,7 +362,7 @@ struct T3kSearchMessage {
 };
 struct T3kModelsMessage { bool ok=false; std::string error; std::vector<ntc::tone3000::Model> models; };
 struct T3kDownloadMessage { bool ok=false; std::string error; fs::path path; };
-struct T3kPreviewMessage { bool ok=false; bool playing=false; std::string error; int sampleRate=0; };
+struct T3kPreviewMessage { bool ok=false; bool playing=false; bool irLoaded=false; std::string error; int sampleRate=0; int irOriginalRate=0; };
 
 std::string utf8FromWide(const std::wstring& s) {
     if (s.empty()) return {};
@@ -712,6 +720,39 @@ void chooseT3kPreviewWav(HWND owner) {
     if (!gT3kPreviewNam.empty()) startT3kPreview(owner, true);
 }
 
+void chooseT3kIrWav(HWND owner) {
+    wchar_t file[32768]{};
+    if (!gT3kIrWavPath.empty()) {
+        const auto current = gT3kIrWavPath.wstring();
+        wcsncpy_s(file, std::size(file), current.c_str(), _TRUNCATE);
+    }
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"Cabinet IR WAV (*.wav)\0*.wav\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(file));
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrDefExt = L"wav";
+    if (!GetOpenFileNameW(&ofn)) return;
+
+    stopT3kPreview();
+    gT3kIrWavPath = fs::path(file);
+    setText(gT3kIrWav, gT3kIrWavPath.wstring());
+    EnableWindow(gT3kIrClear, TRUE);
+    setText(gT3kState, L"Cabinet IR selected. Non-48 kHz IRs are resampled internally to 48 kHz.");
+    if (!gT3kPreviewNam.empty() && !gT3kPreviewWavPath.empty()) startT3kPreview(owner, true);
+}
+
+void clearT3kIr(HWND owner) {
+    stopT3kPreview();
+    gT3kIrWavPath.clear();
+    setText(gT3kIrWav, L"");
+    EnableWindow(gT3kIrClear, FALSE);
+    setText(gT3kState, L"Cabinet IR cleared. Preview will play the NAM without an IR.");
+    if (!gT3kPreviewNam.empty() && !gT3kPreviewWavPath.empty()) startT3kPreview(owner, true);
+}
+
 void stopT3kPreview(){
     gT3kPreviewPlayer.stop();
     if(gT3kPreviewStop) EnableWindow(gT3kPreviewStop,FALSE);
@@ -743,13 +784,18 @@ void startT3kPreview(HWND hwnd,bool forceLoad){
     gT3kPreviewBusy=true;
     EnableWindow(gT3kPreviewPlay,FALSE);
     EnableWindow(gT3kPreviewStop,FALSE);
-    setText(gT3kState,L"Loading NAM and selected WAV for real-time preview...");
+    setText(gT3kState, gT3kIrWavPath.empty()
+        ? L"Loading NAM and selected WAV for real-time preview..."
+        : L"Loading NAM + cabinet IR for real-time preview...");
     const fs::path nam=gT3kPreviewNam;
-    std::thread([hwnd,nam,input]{
+    const fs::path ir=gT3kIrWavPath;
+    std::thread([hwnd,nam,input,ir]{
         auto* m=new T3kPreviewMessage;
-        m->ok=gT3kPreviewPlayer.load(nam,input,m->error);
+        m->ok=gT3kPreviewPlayer.load(nam,input,ir,m->error);
         if(m->ok){
             m->sampleRate=gT3kPreviewPlayer.sampleRate();
+            m->irLoaded=gT3kPreviewPlayer.irLoaded();
+            m->irOriginalRate=gT3kPreviewPlayer.irOriginalSampleRate();
             m->playing=gT3kPreviewPlayer.play(m->error);
             if(!m->playing) m->ok=false;
         }
@@ -1205,7 +1251,7 @@ void computeLayout(int clientW, int clientH) {
     gUi.footer = RECT{ 0, clientH - footerH, clientW, clientH };
     gUi.infoBox = RECT{ gUi.sectionRecorded.left + 108, gUi.sectionRecorded.top + 62,
                         gUi.sectionRecorded.right - 16, gUi.sectionRecorded.top + 96 };
-    gUi.uploaderCard = RECT{ margin, 145, clientW - margin, 615 };
+    gUi.uploaderCard = RECT{ margin, 145, clientW - margin, 675 };
 }
 
 void layoutControls(HWND hwnd) {
@@ -1282,11 +1328,19 @@ void layoutControls(HWND hwnd) {
     moveCtrl(gT3kModels, ux, gUi.uploaderCard.top + 364, ur - ux - 220, 220);
     moveCtrl(gT3kUse, ur - 208, gUi.uploaderCard.top + 360, 208, 36);
     moveCtrl(gT3kState, ux, gUi.uploaderCard.top + 408, ur - ux, 24);
-    moveCtrl(GetDlgItem(hwnd,1024), ux, gUi.uploaderCard.top + 438, 92, 22);
-    moveCtrl(gT3kPreviewWav, ux + 94, gUi.uploaderCard.top + 434, ur - ux - 94 - 386, 30);
-    moveCtrl(gT3kPreviewBrowse, ur - 376, gUi.uploaderCard.top + 434, 116, 32);
-    moveCtrl(gT3kPreviewPlay, ur - 252, gUi.uploaderCard.top + 434, 152, 32);
-    moveCtrl(gT3kPreviewStop, ur - 92, gUi.uploaderCard.top + 434, 92, 32);
+
+    // Cabinet IR row. Keep it above Preview so the signal chain reads NAM -> IR -> output.
+    moveCtrl(GetDlgItem(hwnd,1025), ux, gUi.uploaderCard.top + 440, 92, 22);
+    moveCtrl(gT3kIrWav, ux + 94, gUi.uploaderCard.top + 436, ur - ux - 94 - 300, 30);
+    moveCtrl(gT3kIrBrowse, ur - 290, gUi.uploaderCard.top + 436, 116, 32);
+    moveCtrl(gT3kIrClear, ur - 166, gUi.uploaderCard.top + 436, 74, 32);
+
+    // Preview moved down to make room for the cabinet IR loader.
+    moveCtrl(GetDlgItem(hwnd,1024), ux, gUi.uploaderCard.top + 486, 92, 22);
+    moveCtrl(gT3kPreviewWav, ux + 94, gUi.uploaderCard.top + 482, ur - ux - 94 - 386, 30);
+    moveCtrl(gT3kPreviewBrowse, ur - 376, gUi.uploaderCard.top + 482, 116, 32);
+    moveCtrl(gT3kPreviewPlay, ur - 252, gUi.uploaderCard.top + 482, 152, 32);
+    moveCtrl(gT3kPreviewStop, ur - 92, gUi.uploaderCard.top + 482, 92, 32);
 
     moveCtrl(gUploaderCloEdit, ux, gUi.uploaderCard.top + 56, ur - ux - 136, 30);
     moveCtrl(gUploaderBrowseButton, ur - 124, gUi.uploaderCard.top + 52, 124, 34);
@@ -1441,6 +1495,11 @@ void createUi(HWND hwnd) {
     gT3kModels = CreateWindowW(L"COMBOBOX",L"",WS_CHILD|CBS_DROPDOWNLIST|WS_VSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_MODELS),nullptr,nullptr); applyFont(gT3kModels);
     gT3kUse = CreateWindowW(L"BUTTON",L"Load selected NAM",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_USE),nullptr,nullptr); applyFont(gT3kUse);
     gT3kState = CreateWindowW(L"STATIC",L"Not connected.",WS_CHILD|SS_LEFTNOWORDWRAP,0,0,0,0,hwnd,controlId(IDC_T3K_STATE),nullptr,nullptr); applyFont(gT3kState);
+    createSectionLabel(hwnd, 1025, L"Cabinet IR");
+    gT3kIrWav = CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|ES_AUTOHSCROLL|ES_READONLY,0,0,0,0,hwnd,controlId(IDC_T3K_IR_WAV),nullptr,nullptr); applyFont(gT3kIrWav);
+    gT3kIrBrowse = CreateWindowW(L"BUTTON",L"Browse IR...",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_IR_BROWSE),nullptr,nullptr); applyFont(gT3kIrBrowse);
+    gT3kIrClear = CreateWindowW(L"BUTTON",L"Clear",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_IR_CLEAR),nullptr,nullptr); applyFont(gT3kIrClear); EnableWindow(gT3kIrClear,FALSE);
+
     createSectionLabel(hwnd, 1024, L"Preview WAV");
     gT3kPreviewWav = CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|ES_AUTOHSCROLL|ES_READONLY,0,0,0,0,hwnd,controlId(IDC_T3K_PREVIEW_WAV),nullptr,nullptr); applyFont(gT3kPreviewWav);
     gT3kPreviewBrowse = CreateWindowW(L"BUTTON",L"Browse WAV...",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_PREVIEW_BROWSE),nullptr,nullptr); applyFont(gT3kPreviewBrowse);
@@ -1790,6 +1849,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (HIWORD(wParam)==LBN_SELCHANGE) startT3kModels(hwnd);
             return 0;
         case IDC_T3K_USE: startT3kDownload(hwnd); return 0;
+        case IDC_T3K_IR_BROWSE: chooseT3kIrWav(hwnd); return 0;
+        case IDC_T3K_IR_CLEAR: clearT3kIr(hwnd); return 0;
         case IDC_T3K_PREVIEW_BROWSE: chooseT3kPreviewWav(hwnd); return 0;
         case IDC_T3K_PREVIEW_PLAY: startT3kPreview(hwnd,false); return 0;
         case IDC_T3K_PREVIEW_STOP: stopT3kPreview(); return 0;
@@ -1894,7 +1955,17 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         EnableWindow(gT3kPreviewPlay,TRUE);
         if(m && m->ok && m->playing){
             EnableWindow(gT3kPreviewStop,TRUE);
-            setText(gT3kState,L"Real-time preview playing at "+std::to_wstring(m->sampleRate)+L" Hz through the loaded NAM.");
+            if (m->irLoaded) {
+                std::wstring text = L"Real-time preview playing through NAM + cabinet IR";
+                if (m->irOriginalRate > 0 && m->irOriginalRate != 48000)
+                    text += L" (IR " + std::to_wstring(m->irOriginalRate) + L" -> 48000 Hz)";
+                else
+                    text += L" (IR 48000 Hz)";
+                text += L".";
+                setText(gT3kState, text);
+            } else {
+                setText(gT3kState,L"Real-time preview playing at "+std::to_wstring(m->sampleRate)+L" Hz through the loaded NAM.");
+            }
         } else if(m){
             setText(gT3kState,L"NAM loaded, but real-time preview failed: "+wideFromUtf8(m->error));
         }
