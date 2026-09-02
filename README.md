@@ -455,3 +455,12 @@ Each NAM downloaded from Tone3000 is registered as temporary. If a CLO conversio
 ## v2.9.6
 - GP-5 uploader UI now identifies itself as GP-5/GP-50 and MIDI detection explicitly accepts `gp-5`, `gp5`, `gp-50`, and `gp50`, while keeping the existing shared upload protocol unchanged.
 - Tone Match is now always enabled for conversions. The UI only selects between the built-in/default reference audio path and a custom WAV reference. Custom WAV keeps the existing first-20-seconds behavior.
+
+
+## v2.9.7
+
+Tone3000 preview adds an optional cabinet IR loader. IR WAVs are accepted at any sample rate and canonicalized to 48 kHz using the existing r8brain resampler; 48 kHz IRs are used directly. If a NAM requires another processing rate, the canonical 48 kHz IR is adapted internally only for the realtime convolution stage. Stereo/multichannel IR WAVs are downmixed to mono, while preview guitar WAVs remain mono-only. The IR is applied after the NAM in the preview signal chain, and the Preview row has been moved down in the Tone3000 tab.
+
+
+### v2.9.8 - Fixed 48 kHz Tone3000 preview path
+The Tone3000 realtime preview now runs on a fixed 48 kHz processing path. Preview WAV audio is resampled to 48 kHz when necessary, cabinet IRs are canonicalized to 48 kHz once when loaded, and no second IR resampling is performed before convolution.

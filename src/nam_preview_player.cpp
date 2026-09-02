@@ -43,7 +43,8 @@ std::uint32_t le32(const std::uint8_t* p) {
 bool readWavMono(const fs::path& path,
                  std::vector<float>& mono,
                  std::uint32_t& sampleRate,
-                 std::string& error) {
+                 std::string& error,
+                 bool requireMono = true) {
     mono.clear();
     sampleRate = 0;
 
@@ -103,7 +104,7 @@ bool readWavMono(const fs::path& path,
         error = "Preview WAV must be PCM or IEEE-float audio.";
         return false;
     }
-    if (channels != 1) {
+    if (requireMono && channels != 1) {
         error = "Preview WAV must be mono (1 channel).";
         return false;
     }
@@ -293,8 +294,10 @@ struct NamPreviewPlayer::Impl {
     mutable std::mutex mutex;
     std::unique_ptr<nam::DSP> dsp;
     std::vector<float> source;
+    std::vector<float> ir;
     fs::path workDir;
     int rate = 0;
+    int irOriginalRate = 0;
     std::thread thread;
     std::atomic<bool> stopRequested{false};
     std::atomic<bool> isPlaying{false};
@@ -355,6 +358,7 @@ struct NamPreviewPlayer::Impl {
 
         nam::DSP* localDsp = nullptr;
         const std::vector<float>* src = nullptr;
+        const std::vector<float>* localIr = nullptr;
         int sampleRate = 0;
         {
             // Only snapshot the objects. load() always calls stop() before it can
@@ -362,6 +366,7 @@ struct NamPreviewPlayer::Impl {
             std::scoped_lock lock(mutex);
             localDsp = dsp.get();
             src = &source;
+            localIr = &ir;
             sampleRate = rate;
         }
         if (!localDsp || !src || src->empty() || sampleRate <= 0) {
@@ -437,6 +442,27 @@ struct NamPreviewPlayer::Impl {
         std::array<NAM_SAMPLE, kFramesPerBuffer> output{};
         NAM_SAMPLE* inputs[1] = { input.data() };
         NAM_SAMPLE* outputs[1] = { output.data() };
+
+        // Optional cabinet IR. Both NAM processing and the IR path run at
+        // 48 kHz, so the IR is resampled only once during load() when needed.
+        std::vector<float> firDelay(localIr ? localIr->size() : 0u, 0.0f);
+        std::size_t firWrite = 0;
+        auto processIr = [&](float x) -> float {
+            if (!localIr || localIr->empty()) return x;
+            const std::size_t n = localIr->size();
+            firDelay[firWrite] = x;
+            double y = 0.0;
+            // Split the circular FIR into two contiguous ranges to avoid a
+            // modulo operation for every tap.
+            std::size_t k = 0;
+            for (; k <= firWrite; ++k)
+                y += static_cast<double>((*localIr)[k]) * firDelay[firWrite - k];
+            for (; k < n; ++k)
+                y += static_cast<double>((*localIr)[k]) * firDelay[n + firWrite - k];
+            if (++firWrite == n) firWrite = 0;
+            return std::isfinite(y) ? static_cast<float>(y) : 0.0f;
+        };
+
         std::size_t pos = 0;
         std::size_t queued = 0;
         std::array<bool, kBufferCount> active{};
@@ -455,6 +481,7 @@ struct NamPreviewPlayer::Impl {
             for (int s = 0; s < n; ++s) {
                 float v = static_cast<float>(output[static_cast<std::size_t>(s)]);
                 if (!std::isfinite(v)) v = 0.0f;
+                v = processIr(v);
                 v = std::clamp(v, -1.0f, 1.0f);
                 const auto sample = static_cast<std::int16_t>(std::lrint(v * 32767.0f));
                 pcm[i][static_cast<std::size_t>(s) * 2u] = sample;
@@ -522,6 +549,7 @@ NamPreviewPlayer::~NamPreviewPlayer() = default;
 
 bool NamPreviewPlayer::load(const fs::path& namPath,
                             const fs::path& sourceWav,
+                            const fs::path& irWav,
                             std::string& error) {
     error.clear();
     impl_->stop();
@@ -535,10 +563,33 @@ bool NamPreviewPlayer::load(const fs::path& namPath,
         error = "Selected preview WAV does not exist.";
         return false;
     }
+    if (!irWav.empty() && (!fs::exists(irWav, ec) || ec)) {
+        error = "Selected cabinet IR WAV does not exist.";
+        return false;
+    }
 
     std::vector<float> source;
     std::uint32_t sourceRate = 0;
     if (!readWavMono(sourceWav, source, sourceRate, error)) return false;
+
+    std::vector<float> ir48;
+    std::uint32_t irRate = 0;
+    if (!irWav.empty()) {
+        std::vector<float> rawIr;
+        if (!readWavMono(irWav, rawIr, irRate, error, false)) {
+            if (error.rfind("Preview", 0) == 0) error.replace(0, 7, "IR");
+            return false;
+        }
+        ir48 = (irRate == 48000u) ? std::move(rawIr)
+                                  : resample(rawIr, static_cast<double>(irRate), 48000.0);
+        if (ir48.empty()) {
+            error = "Could not resample the cabinet IR to 48000 Hz.";
+            return false;
+        }
+        // Remove only numerically empty tail samples. No normalization is done:
+        // the IR's original gain remains intact.
+        while (ir48.size() > 1 && std::abs(ir48.back()) < 1.0e-9f) ir48.pop_back();
+    }
 
     const auto base = fs::temp_directory_path(ec);
     if (ec) {
@@ -563,20 +614,23 @@ bool NamPreviewPlayer::load(const fs::path& namPath,
             error = "NeuralAmpModelerCore could not load the preview NAM.";
             return false;
         }
-        double expectedRate = dsp->GetExpectedSampleRate();
-        if (!(expectedRate > 1000.0 && expectedRate < 384000.0)) expectedRate = 48000.0;
-        auto adapted = std::abs(expectedRate - static_cast<double>(sourceRate)) < 0.5
+        // NAM preview runs on a fixed 48 kHz processing path.  Preview audio
+        // and cabinet IRs are both converted once to 48 kHz before playback.
+        constexpr double kPreviewRate = 48000.0;
+        auto adapted = std::abs(kPreviewRate - static_cast<double>(sourceRate)) < 0.5
                          ? std::move(source)
-                         : resample(source, static_cast<double>(sourceRate), expectedRate);
+                         : resample(source, static_cast<double>(sourceRate), kPreviewRate);
         if (adapted.empty()) {
-            error = "Could not prepare preview audio at the NAM sample rate.";
+            error = "Could not prepare preview audio at 48000 Hz.";
             return false;
         }
 
         std::scoped_lock lock(impl_->mutex);
         impl_->dsp = std::move(dsp);
         impl_->source = std::move(adapted);
-        impl_->rate = static_cast<int>(std::llround(expectedRate));
+        impl_->ir = std::move(ir48);
+        impl_->rate = 48000;
+        impl_->irOriginalRate = static_cast<int>(irRate);
         impl_->workDir = work;
         return true;
     } catch (const std::exception& e) {
@@ -598,6 +652,16 @@ bool NamPreviewPlayer::playing() const { return impl_->isPlaying.load(std::memor
 int NamPreviewPlayer::sampleRate() const {
     std::scoped_lock lock(impl_->mutex);
     return impl_->rate;
+}
+
+bool NamPreviewPlayer::irLoaded() const {
+    std::scoped_lock lock(impl_->mutex);
+    return !impl_->ir.empty();
+}
+
+int NamPreviewPlayer::irOriginalSampleRate() const {
+    std::scoped_lock lock(impl_->mutex);
+    return impl_->irOriginalRate;
 }
 
 } // namespace ntc
