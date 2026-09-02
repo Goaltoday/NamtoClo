@@ -464,3 +464,7 @@ Tone3000 preview adds an optional cabinet IR loader. IR WAVs are accepted at any
 
 ### v2.9.8 - Fixed 48 kHz Tone3000 preview path
 The Tone3000 realtime preview now runs on a fixed 48 kHz processing path. Preview WAV audio is resampled to 48 kHz when necessary, cabinet IRs are canonicalized to 48 kHz once when loaded, and no second IR resampling is performed before convolution.
+
+
+### v2.9.9 build fix
+The realtime preview IR interface is synchronized between `nam_preview_player.hpp` and `nam_preview_player.cpp`. The modified-files package now includes both files, fixing C2511/C2039 build errors when applying the incremental update over an older tree.

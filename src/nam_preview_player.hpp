@@ -18,6 +18,7 @@ public:
     // the NAM DSP. No processed preview WAV is generated.
     bool load(const std::filesystem::path& namPath,
               const std::filesystem::path& sourceWav,
+              const std::filesystem::path& irWav,
               std::string& error);
 
     // Starts block-by-block realtime playback through the already loaded NAM.
@@ -27,6 +28,8 @@ public:
     bool ready() const;
     bool playing() const;
     int sampleRate() const;
+    bool irLoaded() const;
+    int irOriginalSampleRate() const;
 
 private:
     struct Impl;
