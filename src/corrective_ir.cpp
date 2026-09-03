@@ -1,5 +1,6 @@
 #include "corrective_ir.hpp"
 #include "common.hpp"
+#include <CDSPResampler.h>
 
 #include <algorithm>
 #include <array>
@@ -8,6 +9,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace ntc {
@@ -135,10 +137,6 @@ bool readWaveFile(const fs::path& path, WavData& wav, std::string& error) {
         error = "Corrective IR WAV must be mono or stereo.";
         return false;
     }
-    if (wav.sampleRate != kExpectedSampleRate) {
-        error = "Corrective IR must be 44.1 kHz.";
-        return false;
-    }
     if (wav.data.empty() || (wav.data.size() % wav.blockAlign) != 0u) {
         error = "Corrective IR WAV contains no complete audio frames.";
         return false;
@@ -193,6 +191,42 @@ double decodeSample(const std::uint8_t* p,
     return 0.0;
 }
 
+std::vector<double> resampleCorrectiveIr(const std::vector<double>& in,
+                                         std::uint32_t inRate,
+                                         std::uint32_t outRate) {
+    if (in.empty() || inRate == 0 || outRate == 0) return {};
+    if (inRate == outRate) return in;
+    if (in.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) return {};
+
+    const int inCount = static_cast<int>(in.size());
+    const int targetCount = std::max(0, static_cast<int>(
+        static_cast<float>(inCount) * static_cast<float>(outRate) / static_cast<float>(inRate)));
+    std::vector<double> out(static_cast<std::size_t>(targetCount), 0.0);
+    if (targetCount == 0) return out;
+
+    std::vector<double> block = in;
+    r8b::CDSPResampler24 rs(static_cast<double>(inRate),
+                            static_cast<double>(outRate),
+                            inCount, 2.0);
+    std::size_t previous = 0;
+    bool first = true;
+    while (previous < out.size()) {
+        if (!first) std::fill(block.begin(), block.end(), 0.0);
+        first = false;
+        double* produced = nullptr;
+        const int count = rs.process(block.data(), inCount, produced);
+        if (count < 0 || produced == nullptr) break;
+        const std::size_t current = static_cast<std::size_t>(count);
+        if (current > previous) {
+            const std::size_t take = std::min<std::size_t>(current - previous, out.size() - previous);
+            for (std::size_t i = 0; i < take; ++i) out[previous + i] = produced[i];
+        }
+        previous = current;
+    }
+    rs.clear();
+    return out;
+}
+
 bool decodeCorrectiveIr(const fs::path& path, std::vector<double>& mono, std::string& error) {
     WavData wav;
     if (!readWaveFile(path, wav, error)) return false;
@@ -235,6 +269,18 @@ bool decodeCorrectiveIr(const fs::path& path, std::vector<double>& mono, std::st
             sum += sample;
         }
         mono[frame] = sum / static_cast<double>(wav.channels);
+    }
+
+    // Corrective IR processing in the CLO path is defined at 44.1 kHz.
+    // Accept the same WAV selected for Tone3000 preview (typically 48 kHz)
+    // and adapt it here instead of forcing the user to maintain a second file.
+    if (wav.sampleRate != kExpectedSampleRate) {
+        auto resampled = resampleCorrectiveIr(mono, wav.sampleRate, kExpectedSampleRate);
+        if (resampled.empty()) {
+            error = "Failed to resample Corrective IR to 44.1 kHz.";
+            return false;
+        }
+        mono = std::move(resampled);
     }
     return true;
 }

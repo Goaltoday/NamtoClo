@@ -740,7 +740,14 @@ void chooseT3kIrWav(HWND owner) {
     gT3kIrWavPath = fs::path(file);
     setText(gT3kIrWav, gT3kIrWavPath.wstring());
     EnableWindow(gT3kIrClear, TRUE);
-    setText(gT3kState, L"Cabinet IR selected. Non-48 kHz IRs are resampled internally to 48 kHz.");
+
+    // Keep the Tone3000 preview IR and the converter Corrective IR selection
+    // in sync.  Deliberately do NOT tick Apply corrective IR here: the user
+    // chooses independently whether the selected IR participates in the
+    // NAM->CLO conversion.
+    if (gCorrectiveEdit) setText(gCorrectiveEdit, gT3kIrWavPath.wstring());
+
+    setText(gT3kState, L"Cabinet IR selected and assigned to Corrective IR (not activated). Non-48 kHz preview IRs are resampled internally to 48 kHz.");
     if (!gT3kPreviewNam.empty() && !gT3kPreviewWavPath.empty()) startT3kPreview(owner, true);
 }
 

@@ -484,3 +484,8 @@ Cabinet IR WAVs are not level-standardised. The Tone3000 preview now uses a tran
 
 ### Tone3000 preview IR static headroom (v2.9.13)
 The realtime IR preview no longer uses a time-varying peak limiter. Hot cabinet IRs are attenuated once at load time so their largest coefficient does not exceed 0.5 (-6.02 dBFS), without boosting quieter IRs. When an IR is active, the preview path also applies a fixed 0.5 (-6.02 dB) output gain before PCM conversion. Both operations are constant-gain changes, so they preserve the IR frequency response and NAM dynamics while providing predictable headroom. A final 0.999 clamp remains only as a numerical safety guard.
+
+### v2.9.14
+- Selecting a Cabinet IR in the Tone3000 preview also assigns that same WAV to the converter's **Corrective IR** path.
+- **Apply corrective IR remains unchecked**; selection and activation stay independent.
+- Corrective IR now accepts non-44.1 kHz WAV files and resamples them internally to 44.1 kHz, so the same 48 kHz cabinet IR used by the Tone3000 preview can be used directly by the converter.
