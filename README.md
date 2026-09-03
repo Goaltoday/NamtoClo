@@ -489,3 +489,12 @@ The realtime IR preview no longer uses a time-varying peak limiter. Hot cabinet 
 - Selecting a Cabinet IR in the Tone3000 preview also assigns that same WAV to the converter's **Corrective IR** path.
 - **Apply corrective IR remains unchecked**; selection and activation stay independent.
 - Corrective IR now accepts non-44.1 kHz WAV files and resamples them internally to 44.1 kHz, so the same 48 kHz cabinet IR used by the Tone3000 preview can be used directly by the converter.
+
+
+### v2.9.15
+
+- Tone3000 preview no longer auto-plays when a NAM, preview WAV, or Cabinet IR is loaded/changed. The chain is prepared and waits for Play.
+- Replaced the separate Replay/Stop controls with one Play/Stop toggle.
+- Added a compact 0-100% output-volume fader to the Tone3000 preview. It is a static post-chain gain and does not change NAM conversion or Corrective IR processing.
+- Tone3000 `amp-cab` captures automatically bypass/disable the preview Cabinet IR controls without clearing the selected IR path. Loading a non-`amp-cab` NAM re-enables the IR and restores the previously selected IR automatically.
+- The Cabinet IR selected in Tone3000 continues to be copied to the converter Corrective IR path without activating Corrective IR automatically.

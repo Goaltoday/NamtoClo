@@ -403,6 +403,7 @@ struct NamPreviewPlayer::Impl {
     std::thread thread;
     std::atomic<bool> stopRequested{false};
     std::atomic<bool> isPlaying{false};
+    std::atomic<float> outputGain{1.0f};
     HANDLE playbackEvent = nullptr;
 
     ~Impl() {
@@ -592,6 +593,10 @@ struct NamPreviewPlayer::Impl {
                 if (irConvolver.active())
                     v *= kIrPreviewGain;
 
+                // User output-volume fader. This is a static linear gain and is
+                // intentionally applied after the complete NAM/IR preview chain.
+                v *= outputGain.load(std::memory_order_relaxed);
+
                 // Numerical last line of defence only. The IR is pre-attenuated
                 // at load time and the fixed -6 dB preview headroom should keep
                 // normal cabinet IRs comfortably below full scale.
@@ -767,6 +772,10 @@ bool NamPreviewPlayer::load(const fs::path& namPath,
 
 bool NamPreviewPlayer::play(std::string& error) { return impl_->start(error); }
 void NamPreviewPlayer::stop() { impl_->stop(); }
+void NamPreviewPlayer::setOutputGain(float gain) {
+    if (!std::isfinite(gain)) gain = 1.0f;
+    impl_->outputGain.store(std::clamp(gain, 0.0f, 1.0f), std::memory_order_relaxed);
+}
 
 bool NamPreviewPlayer::ready() const {
     std::scoped_lock lock(impl_->mutex);

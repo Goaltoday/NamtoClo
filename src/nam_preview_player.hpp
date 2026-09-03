@@ -32,6 +32,9 @@ public:
     bool play(std::string& error);
     void stop();
 
+    // Linear post-NAM/post-IR preview gain. 0.0 = mute, 1.0 = unity.
+    void setOutputGain(float gain);
+
     bool ready() const;
     bool playing() const;
     int sampleRate() const;
