@@ -17,7 +17,9 @@ struct ConversionResult {
     bool ok = false;
     std::string error;
     fs::path inputNam;
-    fs::path gp2001024;
+    fs::path outputClo;
+    CloDestination destination = CloDestination::Gp200;
+    CloRefineStats toneMatch;
 };
 
 struct BatchConversionResult {

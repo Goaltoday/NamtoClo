@@ -1,10 +1,27 @@
-# NAM to CLO v2.7.0
+# NAM to CLO v2.10.0
+
+
+## Current conversion flow (v2.10.0)
+
+NAM → original A128/B2048 conversion → optional Corrective IR on B2048 → truncate B to the selected destination → build and evaluate TWO Tone Match candidates → save the better final CLO.
+
+- **GP-200:** A128/B1024, historical padded physical container (0x2288), declared size 0x1288.
+- **GP-5:** A128/B512, physical/declared size 0x0A88.
+- No 5% smoothing. Raw candidate uses target-source dB; confidence candidate multiplies that curve by spectral confidence.
+- Both candidates start independently from the same truncated model and retain the historical B RMS normalization with 0 dB Tone Match post gain.
+- Winner: lowest unweighted spectral RMSE in dB over the same 512 log-spaced frequencies (40–18000 Hz) and the same informative windows from seconds 50–70. Deterministic ties select the raw candidate.
+- Each candidate is evaluated AFTER convolution, destination truncation and normalization. Nothing changes the winning coefficients afterwards.
+- Selection is relative to the selected reference, not a guarantee of universally better sound. The baseline score is diagnostic; only the two requested Tone Match variants compete.
+- Corrective IR is also applied to the NAM target with the same effective gain, as before.
+
+See [VERSION_2.10.0.md](VERSION_2.10.0.md) for changes, validation and installation. This section supersedes descriptions of older Tone Match behavior retained below.
 
 Windows x64 application for converting Neural Amp Modeler (`.nam`) models to CLO files and uploading CLO files directly to Valeton GP-200 and GP-5 devices over USB MIDI.
 
-The application has three tabs:
+The application has four tabs:
 
 - **Convert to CLO** — convert one NAM model or every NAM model in a folder.
+- **Tone3000** — search/download NAM captures and audition them.
 - **GP-200 Uploader** — upload an existing `.clo` file to one of the 10 GP-200 SnapTone slots.
 - **GP-5 Uploader** — adapt a compatible CLO in memory to the GP-5 runtime format and upload it to **SnapTone 51-80**.
 
@@ -23,7 +40,7 @@ The current implementation intentionally exposes only **SnapTone 51-80**, the ra
 3. Open **Convert to CLO**.
 4. Select a `.nam` file or a folder containing `.nam` files.
 5. Select the output folder.
-6. Leave the optional processing disabled for a standard conversion, or configure **Tail / Reamp**, **Corrective IR** and/or **Tone Match** as described below.
+6. Select **GP-200 (B1024)** or **GP-5 (B512)** at the top. Configure optional **Tail / Reamp** and **Corrective IR**; choose the default or custom Tone Match reference. Tone Match is always run.
 7. Press **Convert**.
 
 The repository includes the required `nam_input_wav.wav`. The supplied file is a 70-second, 44.1 kHz, 16-bit PCM WAV. The application adapts it internally to the mono stimulus used by the converter.

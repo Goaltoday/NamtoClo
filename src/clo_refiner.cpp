@@ -1,6 +1,5 @@
 #include "clo_refiner.hpp"
 #include "common.hpp"
-#include "corrective_ir.hpp"
 
 #include <algorithm>
 #include <array>
@@ -109,7 +108,7 @@ bool parseModel(const std::vector<std::uint8_t>& d, Model& m, std::string& error
     m.post={led(d.data()+0x40),led(d.data()+0x48),led(d.data()+0x50),led(d.data()+0x58),led(d.data()+0x60)};
     m.pp=lef(d.data()+0x68);m.pn=lef(d.data()+0x6c);m.kp=lef(d.data()+0x70);m.kn=lef(d.data()+0x74);
     auto sa=le32(d.data()+0x78),ca=le32(d.data()+0x7c),sb=le32(d.data()+0x80),cb=le32(d.data()+0x84);
-    std::uint64_t need=kCoeffBase+4ull*std::max<std::uint64_t>(sa+ca,sb+cb); if(ca==0||cb==0||need>d.size()){error="Truncated CLO coefficients.";return false;}
+    std::uint64_t need=kCoeffBase+4ull*std::max<std::uint64_t>(std::uint64_t(sa)+ca,std::uint64_t(sb)+cb); if(ca==0||cb==0||need>d.size()){error="Truncated CLO coefficients.";return false;}
     m.A.resize(ca);m.B.resize(cb);for(std::size_t i=0;i<ca;++i)m.A[i]=lef(d.data()+kCoeffBase+4ull*(sa+i));for(std::size_t i=0;i<cb;++i)m.B[i]=lef(d.data()+kCoeffBase+4ull*(sb+i));return true;
 }
 
@@ -201,13 +200,6 @@ void renderPreB(const Model& base,const std::vector<float>& aout,float pp,float 
     }
 }
 
-double fitScale(const std::vector<float>& candidate,const std::vector<float>& target){
-    const std::size_t n=std::min(candidate.size(),target.size());
-    long double cc=0.0L,ct=0.0L;
-    for(std::size_t i=0;i<n;++i){ cc+=static_cast<long double>(candidate[i])*candidate[i]; ct+=static_cast<long double>(candidate[i])*target[i]; }
-    return cc>1e-30L?static_cast<double>(ct/cc):1.0;
-}
-
 std::vector<float> hannWindow(std::size_t n){
     std::vector<float> w(n);
     constexpr double pi=3.14159265358979323846;
@@ -219,10 +211,7 @@ std::vector<float> hannWindow(std::size_t n){
 }
 
 namespace {
-// Tone Match analysis on the final 20 s.
-// No band guards, no confidence masking, no artificial HF freeze and no global-level removal.
-// The generated 2048-sample minimum-phase IR is applied directly in memory to Block B.
-// This avoids creating a temporary diagnostic WAV without changing the correction itself.
+// Final-size Tone Match; confidence only changes candidate construction.
 constexpr std::size_t kV26Fft=16384;
 constexpr std::size_t kV26Hop=4096;
 constexpr int kV26Groups=11;
@@ -233,7 +222,6 @@ constexpr double kV26CmpMinHz=40.0;
 constexpr double kV26CmpMaxHz=18000.0;
 constexpr std::size_t kV26Points=512;
 constexpr std::size_t kV26IrLength=2048;
-constexpr double kV26Smooth=0.05; // same slider setting requested by the user
 constexpr double kV26MadToSigma=1.4826;
 constexpr double kV26NegInf=-160.0;
 constexpr double kV26ConfRefDb=3.0;
@@ -245,7 +233,7 @@ static double v26median(std::vector<double> v){if(v.empty())return 0; auto m=v.b
 static double v26mad(const std::vector<double>& v,double med){std::vector<double>d;d.reserve(v.size());for(double x:v)d.push_back(std::abs(x-med));return v26median(std::move(d));}
 static double v26interp(const std::vector<double>&f,const std::vector<double>&v,double hz){if(f.empty()||f.size()!=v.size())return 0;if(hz<=f.front())return v.front();if(hz>=f.back())return v.back();auto u=std::lower_bound(f.begin(),f.end(),hz);auto i1=static_cast<std::size_t>(std::distance(f.begin(),u));auto i0=i1-1;double a=(hz-f[i0])/(f[i1]-f[i0]);return v[i0]+std::clamp(a,0.0,1.0)*(v[i1]-v[i0]);}
 
-static V26Profile v26analyse(const std::vector<float>& s,double scale,std::size_t start,std::size_t count){
+static V26Profile v26analyse(const std::vector<float>& s,double scale,std::size_t start,std::size_t count,const std::vector<std::size_t>* fixedWindows=nullptr){
     V26Profile p;if(start>=s.size())return p;std::size_t end=std::min(s.size(),start+count);if(end-start<kV26Fft)return p;
     auto win=hannWindow(kV26Fft);std::array<std::vector<long double>,kV26Groups> sums;for(auto&g:sums)g.assign(kV26Fft/2+1,0);std::array<std::size_t,kV26Groups> counts{};std::vector<std::complex<float>> b(kV26Fft);double silence=std::pow(10.0,kV26SilenceDb/20.0);std::size_t accepted=0;
     // source/target are internal floating-point renders, not PCM files being
@@ -254,88 +242,201 @@ static V26Profile v26analyse(const std::vector<float>& s,double scale,std::size_
     // one sample crosses 0.999 caused active DI material (especially bass)
     // to produce zero accepted frames and "Tone Match comparison invalid".
     // Keep only the silence guard here.
-    for(std::size_t pos=start;pos+kV26Fft<=end;pos+=kV26Hop){long double ss=0;double mean=0;for(std::size_t i=0;i<kV26Fft;++i){double x=scale*s[pos+i];ss+=x*x;mean+=x;}double rms=std::sqrt(static_cast<double>(ss/kV26Fft));if(!std::isfinite(rms)||rms<silence)continue;mean/=kV26Fft;for(std::size_t i=0;i<kV26Fft;++i)b[i]={static_cast<float>((scale*s[pos+i]-mean)*win[i]),0};fft(b,false);auto gi=accepted%kV26Groups;for(std::size_t k=0;k<=kV26Fft/2;++k){double hz=double(k)*kSampleRate/kV26Fft;if(hz<kV26MinHz||hz>kV26MaxHz)continue;double mag=std::abs(b[k]);sums[gi][k]+=mag*mag;}++counts[gi];++accepted;}
+    for(std::size_t pos=start;pos+kV26Fft<=end;pos+=kV26Hop){if(fixedWindows && !std::binary_search(fixedWindows->begin(),fixedWindows->end(),pos))continue;long double ss=0;double mean=0;for(std::size_t i=0;i<kV26Fft;++i){double x=scale*s[pos+i];ss+=x*x;mean+=x;}double rms=std::sqrt(static_cast<double>(ss/kV26Fft));if(!std::isfinite(rms))return {};if(!fixedWindows && rms<silence)continue;mean/=kV26Fft;for(std::size_t i=0;i<kV26Fft;++i)b[i]={static_cast<float>((scale*s[pos+i]-mean)*win[i]),0};fft(b,false);auto gi=accepted%kV26Groups;for(std::size_t k=0;k<=kV26Fft/2;++k){double hz=double(k)*kSampleRate/kV26Fft;if(hz<kV26MinHz||hz>kV26MaxHz)continue;double mag=std::abs(b[k]);sums[gi][k]+=mag*mag;}++counts[gi];++accepted;}
     p.frames=accepted;if(!accepted)return p;std::size_t active=0;for(auto c:counts)if(c)++active;std::vector<double> spec(kV26Fft/2+1,kV26NegInf),dev(kV26Fft/2+1,0);double strongest=kV26NegInf;
     for(std::size_t k=0;k<=kV26Fft/2;++k){double hz=double(k)*kSampleRate/kV26Fft;if(hz<kV26MinHz||hz>kV26MaxHz)continue;std::vector<double> means;for(int g=0;g<kV26Groups;++g)if(counts[g]){double mp=static_cast<double>(sums[g][k]/counts[g]);means.push_back(10*std::log10(std::max(mp,1e-20)));}double med=v26median(means);spec[k]=med;dev[k]=kV26MadToSigma*v26mad(means,med);strongest=std::max(strongest,med);}
     std::size_t incl=0,confident=0;for(std::size_t k=0;k<=kV26Fft/2;++k){double hz=double(k)*kSampleRate/kV26Fft;if(hz<kV26MinHz||hz>kV26MaxHz)continue;double frameC=v26clamp(double(accepted)/32.0),groupC=v26clamp(double(active)/kV26Groups),energyC=v26clamp((spec[k]-strongest+60.0)/60.0),stable=1.0/(1.0+dev[k]/kV26ConfRefDb),c=v26clamp(frameC*groupC*energyC*stable);p.f.push_back(hz);p.db.push_back(spec[k]);p.conf.push_back(c);++incl;if(c>=.25)++confident;}if(incl)p.coverage=double(confident)/incl;return p;
 }
 static V26Comp v26compare(const V26Profile&s,const V26Profile&t){V26Comp c;if(!s.valid()||!t.valid())return c;double a=std::log(kV26CmpMinHz),b=std::log(kV26CmpMaxHz);for(std::size_t i=0;i<kV26Points;++i){double q=double(i)/(kV26Points-1),hz=std::exp(a+q*(b-a));c.f.push_back(hz);c.raw.push_back(v26interp(t.f,t.db,hz)-v26interp(s.f,s.db,hz));c.conf.push_back(v26clamp(std::min(v26interp(s.f,s.conf,hz),v26interp(t.f,t.conf,hz))));}return c;}
-static double v26SmoothWidth(double amount){struct P{double a,w;};static constexpr P p[]={{0,0},{.25,1.0/24},{.5,1.0/12},{.75,1.0/6},{1,1.0/3}};if(amount<=0)return 0;for(int i=1;i<5;++i)if(amount<=p[i].a){double q=(amount-p[i-1].a)/(p[i].a-p[i-1].a);return p[i-1].w+q*(p[i].w-p[i-1].w);}return p[4].w;}
-static std::vector<double> v26smooth(const V26Comp&c,double amount){std::vector<double> out(c.raw.size());if(amount<=0)return c.raw;double width=v26SmoothWidth(amount),sigma=std::max(width/2.354820045,1e-6),maxd=3*sigma;for(std::size_t i=0;i<c.raw.size();++i){double sw=0,sx=0;for(std::size_t j=0;j<c.raw.size();++j){double d=std::log2(c.f[j]/c.f[i]);if(std::abs(d)>maxd)continue;double w=std::exp(-.5*d*d/(sigma*sigma));sx+=w*c.raw[j];sw+=w;}out[i]=sw>1e-12?sx/sw:c.raw[i];}return out;}
-static std::vector<float> v26minPhaseIr(const V26Comp&c,double smooth){auto curve=v26smooth(c,smooth);const std::size_t N=4096;std::vector<std::complex<float>> logsp(N),cep(N),mc(N),cls(N),mps(N),imp(N);for(std::size_t k=0;k<=N/2;++k){double hz=double(k)*kSampleRate/N,db=v26interp(c.f,curve,hz),lm=db*0.11512925464970229;logsp[k]={float(lm),0};if(k>0&&k<N/2)logsp[N-k]={float(lm),0};}fft(logsp,true);cep=logsp;mc[0]=cep[0];for(std::size_t i=1;i<N/2;++i)mc[i]=cep[i]*2.0f;mc[N/2]=cep[N/2];fft(mc,false);cls=mc;for(std::size_t i=0;i<N;++i)mps[i]=std::exp(cls[i]);fft(mps,true);imp=mps;std::vector<float> ir(kV26IrLength);for(std::size_t i=0;i<ir.size();++i)ir[i]=imp[i].real();return ir;}
+static std::vector<float> v26minPhaseIr(const V26Comp&c,bool useConfidence){auto curve=c.raw;if(useConfidence)for(std::size_t i=0;i<curve.size();++i)curve[i]*=c.conf[i];const std::size_t N=4096;std::vector<std::complex<float>> logsp(N),cep(N),mc(N),cls(N),mps(N),imp(N);for(std::size_t k=0;k<=N/2;++k){double hz=double(k)*kSampleRate/N,db=v26interp(c.f,curve,hz),lm=db*0.11512925464970229;logsp[k]={float(lm),0};if(k>0&&k<N/2)logsp[N-k]={float(lm),0};}fft(logsp,true);cep=logsp;mc[0]=cep[0];for(std::size_t i=1;i<N/2;++i)mc[i]=cep[i]*2.0f;mc[N/2]=cep[N/2];fft(mc,false);cls=mc;for(std::size_t i=0;i<N;++i)mps[i]=std::exp(cls[i]);fft(mps,true);imp=mps;std::vector<float> ir(kV26IrLength);for(std::size_t i=0;i<ir.size();++i)ir[i]=imp[i].real();return ir;}
 static void renderWithB(const std::vector<float>& preB,const std::vector<float>& B,std::vector<float>& out,float outputGain=1.0f){
     FirFftPlan plan(B);
     plan.process(preB,out);
     if(outputGain!=1.0f) for(auto& x:out) x*=outputGain;
 }
 
+
+// Use the same informative windows for baseline, target and both candidates.
+// A candidate cannot improve its score by becoming silent in difficult frames.
+static std::vector<std::size_t> sharedWindows(const std::vector<float>& source,
+                                             const std::vector<float>& target) {
+    std::vector<std::size_t> positions;
+    const double threshold = std::pow(10.0, kV26SilenceDb / 20.0);
+    for (std::size_t pos=0; pos+kV26Fft<=std::min(source.size(),target.size()); pos+=kV26Hop) {
+        long double a=0, b=0;
+        for (std::size_t i=0;i<kV26Fft;++i) {
+            const double x=source[pos+i], y=target[pos+i];
+            a+=x*x; b+=y*y;
+        }
+        const double ar=std::sqrt(static_cast<double>(a/kV26Fft));
+        const double br=std::sqrt(static_cast<double>(b/kV26Fft));
+        if (std::isfinite(ar) && std::isfinite(br) && ar>=threshold && br>=threshold)
+            positions.push_back(pos);
+    }
+    return positions;
 }
+
+static bool finiteSamples(const std::vector<float>& samples) {
+    return std::all_of(samples.begin(),samples.end(),[](float v){return std::isfinite(v);});
+}
+
+// Same historical Tone Match normalization: RMS of B coefficients, 0 dB post gain.
+// Apply/truncate/normalize at the destination size BEFORE evaluating the candidate.
+static bool correctedFinalB(const std::vector<float>& base,const std::vector<float>& ir,
+                             std::vector<float>& result) {
+    if(base.empty() || ir.empty() || !finiteSamples(base) || !finiteSamples(ir)) return false;
+    std::vector<double> conv(base.size());
+    long double oldEnergy=0, newEnergy=0;
+    for(std::size_t n=0;n<base.size();++n) {
+        long double sum=0;
+        for(std::size_t k=0;k<=std::min(n,ir.size()-1);++k)
+            sum+=static_cast<long double>(base[n-k])*ir[k];
+        conv[n]=static_cast<double>(sum);
+        oldEnergy+=static_cast<long double>(base[n])*base[n];
+        newEnergy+=static_cast<long double>(conv[n])*conv[n];
+    }
+    if(!(oldEnergy>1e-40L) || !(newEnergy>1e-40L) || !std::isfinite(newEnergy))return false;
+    const double gain=std::sqrt(static_cast<double>(oldEnergy/newEnergy));
+    if(!std::isfinite(gain))return false;
+    result.resize(base.size());
+    for(std::size_t i=0;i<result.size();++i) {
+        const double v=conv[i]*gain;
+        if(!std::isfinite(v) || std::abs(v)>std::numeric_limits<float>::max())return false;
+        result[i]=static_cast<float>(v);
+    }
+    return true;
+}
+
+static double spectralRmse(const V26Profile& source,const V26Profile& target) {
+    const auto comparison=v26compare(source,target);
+    if(!comparison.valid())return std::numeric_limits<double>::infinity();
+    long double sum=0;
+    for(double d:comparison.raw) {
+        if(!std::isfinite(d))return std::numeric_limits<double>::infinity();
+        sum+=d*d;
+    }
+    // Deliberately no confidence weighting, no level fitting and no smoothing.
+    return std::sqrt(static_cast<double>(sum/comparison.raw.size()));
+}
+
+static bool writeFinalClo(const std::vector<std::uint8_t>& source,const std::vector<float>& b,
+                          const fs::path& output,std::string& error) {
+    const std::size_t declared=0x88+4*(128+b.size());
+    // Preserve GP-200's historically accepted padded physical container.
+    const std::size_t physical=b.size()==1024 ? 0x2288 : declared;
+    std::vector<std::uint8_t> data(physical,0);
+    std::copy_n(source.begin(),0x88+128*4,data.begin());
+    auto put32=[&](std::size_t off,std::uint32_t v) {
+        for(int i=0;i<4;++i)data[off+i]=static_cast<std::uint8_t>(v>>(8*i));
+    };
+    put32(4,static_cast<std::uint32_t>(declared));
+    put32(0x14,static_cast<std::uint32_t>(4*(128+b.size())));
+    put32(0x78,0);put32(0x7c,128);put32(0x80,128);put32(0x84,static_cast<std::uint32_t>(b.size()));
+    for(std::size_t i=0;i<b.size();++i) {
+        std::uint32_t bits;std::memcpy(&bits,&b[i],4);put32(0x288+4*i,bits);
+    }
+    std::uint16_t crc=0xffff;
+    for(std::size_t i=12;i<declared;++i) {
+        crc^=data[i];
+        for(int bit=0;bit<8;++bit)crc=(crc&1)?static_cast<std::uint16_t>((crc>>1)^0xa001):static_cast<std::uint16_t>(crc>>1);
+    }
+    data[8]=static_cast<std::uint8_t>(crc>>8);data[9]=static_cast<std::uint8_t>(crc);
+    return writeFileBytes(output,data.data(),data.size(),error);
+}
+
+} // namespace
 
 bool refineCloBOnly(const fs::path& inputClo2048,
                     const fs::path& stimulusWav,
                     const fs::path& targetWav,
-                    const fs::path& outputClo2048,
+                    const fs::path& outputClo,
                     const CloRefineConfig& config,
                     std::string& error,
-                    const RefineStatusCallback& status) {
+                    const RefineStatusCallback& status,
+                    CloRefineStats* stats) {
+    error.clear();
+    CloRefineStats result;
+    if(stats)*stats=result;
+    if(config.destination!=CloDestination::Gp200 && config.destination!=CloDestination::Gp5) {
+        error="Invalid CLO destination.";return false;
+    }
     std::vector<std::uint8_t> bytes;
-    if (!readFileBytes(inputClo2048, bytes, error)) return false;
-
-    Model m;
-    if (!parseModel(bytes, m, error)) return false;
-
-    std::vector<float> in, target;
-    if (!readMono44100(stimulusWav, in, error) || !readMono44100(targetWav, target, error)) return false;
-
-    const std::size_t tailFrames = 20u * kSampleRate;
-    if (in.size() < tailFrames + kV26Fft) {
-        error = "The conversion stimulus is too short for the final-20-s Tone Match";
-        return false;
+    if(!readFileBytes(inputClo2048,bytes,error))return false;
+    // The initial NAM conversion and optional manual Corrective IR remain B2048.
+    if(bytes.size()!=0x2288 || le32(bytes.data()+4)!=0x2288 || le32(bytes.data()+0x14)!=0x2200 ||
+       le32(bytes.data()+0x78)!=0 || le32(bytes.data()+0x7c)!=128 ||
+       le32(bytes.data()+0x80)!=128 || le32(bytes.data()+0x84)!=2048) {
+        error="Final Tone Match requires the original A128/B2048 CLO.";return false;
     }
-    if (target.size() < tailFrames) {
-        error = "The refinement target WAV must contain at least 20.000 seconds of audio";
-        return false;
+    Model model;
+    if(!parseModel(bytes,model,error))return false;
+    if(!finiteSamples(model.A) || !finiteSamples(model.B)) {
+        error="Non-finite CLO coefficients.";return false;
     }
-
-    if (status) status(L"Rendering CLO for Tone Match with CloPlayer Gain/Volume wrapper...");
-    const float inputGain = cloPlayerGainControlToLinear(kToneMatchGainControl);
-    const float outputGain = cloPlayerVolumeControlToLinear(kToneMatchVolumeControl);
-    auto aout = precomputeA(m, in, in.size(), inputGain);
-    std::vector<float> preB, orig;
-    renderPreB(m, aout, m.pp, m.pn, m.kp, m.kn, preB);
-    renderWithB(preB, m.B, orig, outputGain);
-
-    const std::size_t sourceStart = orig.size() - tailFrames;
-    const std::size_t targetStart = target.size() - tailFrames;
-    std::vector<float> sourceTail(orig.begin() + static_cast<std::ptrdiff_t>(sourceStart), orig.end());
-    std::vector<float> targetTail(target.begin() + static_cast<std::ptrdiff_t>(targetStart), target.end());
-
-    // Match the VST Tone Match behaviour: analyse SOURCE at its real level.
-    // Do not least-squares scale the CLO render toward TARGET before the
-    // spectral comparison, otherwise part of the level difference is removed
-    // before TARGET - SOURCE is calculated.
-    const auto sourceProfile = v26analyse(sourceTail, 1.0, 0, tailFrames);
-    const auto targetProfile = v26analyse(targetTail, 1.0, 0, tailFrames);
-    const auto comparison = v26compare(sourceProfile, targetProfile);
-    if (!comparison.valid()) {
-        error = "Tone Match comparison invalid (accepted source frames: "
-              + std::to_string(sourceProfile.frames)
-              + ", target frames: " + std::to_string(targetProfile.frames) + ")";
-        return false;
+    const std::size_t taps=destinationBTaps(config.destination);
+    model.B.resize(taps);
+    std::vector<float> input,target;
+    if(!readMono44100(stimulusWav,input,error) || !readMono44100(targetWav,target,error))return false;
+    constexpr std::size_t usefulFrames=70u*kSampleRate, tailFrames=20u*kSampleRate;
+    if(input.size()<usefulFrames || target.size()<usefulFrames) {
+        error="Tone Match requires the complete 70-second stimulus and NAM render.";return false;
     }
+    // The trainer appends 600 guard samples: compare exactly 50-70 seconds.
+    input.resize(usefulFrames);target.resize(usefulFrames);
+    if(!finiteSamples(input) || !finiteSamples(target)) {
+        error="Non-finite Tone Match audio.";return false;
+    }
+    if(status)status(L"Tone Match: rendering destination B"+std::to_wstring(taps)+L" baseline...");
+    const float inputGain=cloPlayerGainControlToLinear(kToneMatchGainControl);
+    const float outputGain=cloPlayerVolumeControlToLinear(kToneMatchVolumeControl);
+    auto aout=precomputeA(model,input,input.size(),inputGain);
+    std::vector<float> preB,original;
+    renderPreB(model,aout,model.pp,model.pn,model.kp,model.kn,preB);
+    renderWithB(preB,model.B,original,outputGain);
+    if(!finiteSamples(original) || !finiteSamples(preB)) {
+        error="CLO render contains non-finite samples.";return false;
+    }
+    const std::size_t tailStart=usefulFrames-tailFrames;
+    std::vector<float> sourceTail(original.begin()+tailStart,original.end());
+    std::vector<float> targetTail(target.begin()+tailStart,target.end());
+    const auto windows=sharedWindows(sourceTail,targetTail);
+    if(windows.empty()) {
+        error="Tone Match has no shared non-silent analysis windows.";return false;
+    }
+    result.analysisFrames=windows.size();
+    const auto sourceProfile=v26analyse(sourceTail,1.0,0,tailFrames,&windows);
+    const auto targetProfile=v26analyse(targetTail,1.0,0,tailFrames,&windows);
+    const auto comparison=v26compare(sourceProfile,targetProfile);
+    if(!comparison.valid()) {error="Tone Match comparison invalid.";return false;}
+    result.baselineRmseDb=spectralRmse(sourceProfile,targetProfile);
 
-    // Keep the established refinement DSP unchanged: 5% smoothing and a
-    // 2048-sample minimum-phase IR. The IR stays in memory and is applied
-    // directly to Block B; no diagnostic/intermediate WAV is written to disk.
-    const auto ir = v26minPhaseIr(comparison, kV26Smooth);
-
-    if (status) status(L"Applying Tone Match correction to Block B...");
-    CorrectiveIrStats correctionStats;
-    // Refinement intentionally uses 0 dB post gain; the historical manual
-    // Corrective IR path keeps its own -6 dB default.
-    if (!applyCorrectiveIrToClo(inputClo2048, ir, outputClo2048, correctionStats, error, 0.0)) return false;
-
-    if (status) status(L"CLO refinement complete. Tone Match correction applied.");
+    auto evaluate=[&](bool confidence,std::vector<float>& b) {
+        const auto ir=v26minPhaseIr(comparison,confidence);
+        if(!correctedFinalB(model.B,ir,b))return std::numeric_limits<double>::infinity();
+        std::vector<float> rendered;
+        renderWithB(preB,b,rendered,outputGain);
+        if(!finiteSamples(rendered))return std::numeric_limits<double>::infinity();
+        std::vector<float> tail(rendered.begin()+tailStart,rendered.end());
+        return spectralRmse(v26analyse(tail,1.0,0,tailFrames,&windows),targetProfile);
+    };
+    std::vector<float> rawB,confidenceB;
+    if(status)status(L"Tone Match: testing WITHOUT confidence on final B"+std::to_wstring(taps)+L"...");
+    result.withoutConfidenceRmseDb=evaluate(false,rawB);
+    if(status)status(L"Tone Match: testing WITH confidence on final B"+std::to_wstring(taps)+L"...");
+    result.withConfidenceRmseDb=evaluate(true,confidenceB);
+    if(!std::isfinite(result.withoutConfidenceRmseDb) && !std::isfinite(result.withConfidenceRmseDb)) {
+        error="Neither final-size Tone Match candidate is valid.";return false;
+    }
+    // Deterministic tie: keep the unweighted candidate.
+    result.selectedConfidence=result.withConfidenceRmseDb<result.withoutConfidenceRmseDb;
+    if(status) {
+        status(L"Tone Match RMSE (dB): without confidence="+std::to_wstring(result.withoutConfidenceRmseDb)+
+               L", with confidence="+std::to_wstring(result.withConfidenceRmseDb)+
+               L". Selected "+(result.selectedConfidence?std::wstring(L"WITH"):std::wstring(L"WITHOUT"))+L" confidence.");
+    }
+    const auto& selected=result.selectedConfidence?confidenceB:rawB;
+    if(!writeFinalClo(bytes,selected,outputClo,error))return false;
+    if(stats)*stats=result;
     return true;
 }
 

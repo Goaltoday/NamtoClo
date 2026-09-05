@@ -1716,7 +1716,7 @@ bool renderNamPreviewToWav(const fs::path& inputNam,const fs::path& inputWav,con
 ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& outputDirectory,
                                              StimulusConfig stimulus,CorrectiveIrConfig correction,CloRefineConfig refine,
                                              NativeConverterConfig trainer,const StatusCallback& status){
-    ConversionResult r;r.inputNam=inputNam;std::string error;std::error_code ec;
+    ConversionResult r;r.inputNam=inputNam;r.destination=refine.destination;std::string error;std::error_code ec;
     if(!fs::exists(inputNam,ec)||ec){r.error="Input NAM does not exist.";return r;}
     fs::create_directories(outputDirectory,ec);if(ec){r.error="Cannot create output directory: "+ec.message();return r;}
 
@@ -1739,7 +1739,6 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
 
     const fs::path original2048=work/L"native_original_2048.clo";if(!serialize2048(original2048,m,sr,error)){r.error=error;fs::remove_all(work,ec);return r;}
 
-    fs::path sourceForOutput=original2048;
     fs::path corrected2048;
     CorrectiveIrStats correctiveStats;
     std::vector<float> correctiveIr;
@@ -1750,11 +1749,10 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
         if(!loadCorrectiveIrSamples(correction.wav,correctiveIr,error)){r.error=error.empty()?"Corrective IR failed.":error;fs::remove_all(work,ec);return r;}
         if(!applyCorrectiveIrToClo(original2048,correctiveIr,corrected2048,correctiveStats,error)){r.error=error.empty()?"Corrective IR failed.":error;fs::remove_all(work,ec);return r;}
         report(status,L"Corrective IR applied: linear convolution, RMS match, -6 dB post gain. RMS gain "+std::to_wstring(correctiveStats.rmsGainDb)+L" dB; total "+std::to_wstring(correctiveStats.totalGainDb)+L" dB.");
-        sourceForOutput=corrected2048;
     }
 
-    fs::path toneMatched2048;
-    if(refine.enabled){
+    const fs::path finalClo=work/L"native_final_TONEMATCH.clo";
+    {
         report(status,L"Tone Match: preparing matched NAM target...");
         fs::path refineStimulus=stim;
         std::vector<float> refineTarget44100=toneTarget44100;
@@ -1781,19 +1779,17 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
         }
 
         const fs::path targetWav=work/L"refine_nam_output.wav";if(!writeMonoFloat32Wav(targetWav,refineTarget44100,44100,error)){r.error=error;fs::remove_all(work,ec);return r;}
-        toneMatched2048=work/L"native_2048_TONEMATCH.clo";
         CloRefineConfig refineRun=refine;
-        if(!refineCloBOnly(toneMatchInputClo,refineStimulus,targetWav,toneMatched2048,refineRun,error,status)){r.error=error.empty()?"CLO refinement failed.":error;fs::remove_all(work,ec);return r;}
+        if(!refineCloBOnly(toneMatchInputClo,refineStimulus,targetWav,finalClo,refineRun,error,status,&r.toneMatch)){r.error=error.empty()?"CLO refinement failed.":error;fs::remove_all(work,ec);return r;}
     }
 
-    if(refine.enabled){
-        report(status,L"Generating Tone Match GP-200 1024 CLO...");
-        r.gp2001024=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_GP200_1024_TONEMATCH.clo");
-        if(!makeGp200CompactClo(toneMatched2048,r.gp2001024,error)){r.error=error;fs::remove_all(work,ec);return r;}
-    }else{
-        r.gp2001024=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_GP200_1024.clo");
-        if(!makeGp200CompactClo(sourceForOutput,r.gp2001024,error)){r.error=error;fs::remove_all(work,ec);return r;}
-    }
+    const bool gp5=refine.destination==CloDestination::Gp5;
+    r.outputClo=uniqueOutput(outputDirectory,inputNam.stem().wstring(),
+        gp5?L"_NATIVE_GP5_512_TONEMATCH.clo":L"_NATIVE_GP200_1024_TONEMATCH.clo");
+    // The candidate has already been rendered/evaluated at exactly this size.
+    // Move it unchanged: no second compacting, normalization or DSP stage.
+    fs::rename(finalClo,r.outputClo,ec);
+    if(ec){r.error="Cannot publish final CLO: "+ec.message();fs::remove_all(work,ec);return r;}
     fs::remove_all(work,ec);r.ok=true;report(status,L"Conversion complete.");return r;
 }
 

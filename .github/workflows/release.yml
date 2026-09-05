@@ -16,12 +16,15 @@ jobs:
         run: cmake -S . -B build -A x64
       - name: Build
         run: cmake --build build --config Release --parallel
+      - name: Test final-size Tone Match
+        run: |
+          cmake -S tests -B build-tests -A x64
+          cmake --build build-tests --config Release
+          ctest --test-dir build-tests -C Release --output-on-failure
       - name: Stage release
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force release/NamToClo | Out-Null
-          Copy-Item build/Release/NamToClo.exe release/NamToClo/NamToClo.exe
-          Copy-Item README.md,LICENSE,THIRD_PARTY.md release/NamToClo/
+          cmake --install build --config Release --prefix release/NamToClo
           Compress-Archive -Path release/NamToClo -DestinationPath release/NamToClo-Windows-x64.zip
       - uses: softprops/action-gh-release@v2
         with:

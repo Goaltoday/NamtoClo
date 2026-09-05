@@ -64,7 +64,7 @@ constexpr int IDC_BROWSE_CORRECTIVE_IR = 120;
 constexpr int IDC_REFINE_CLO = 121;
 constexpr int IDC_REFINE_TARGET_PATH = 122;
 constexpr int IDC_BROWSE_REFINE_TARGET = 123;
-constexpr int IDC_REFINE_SOURCE = 155;
+constexpr int IDC_REFINE_SOURCE = 160; // distinct from Cabinet IR edit (155)
 constexpr int IDC_BACKEND_TABS = 124;
 constexpr int IDC_UPLOADER_CLO_PATH = 125;
 constexpr int IDC_UPLOADER_BROWSE = 126;
@@ -100,6 +100,7 @@ constexpr int IDC_T3K_IR_WAV = 155;
 constexpr int IDC_T3K_IR_BROWSE = 156;
 constexpr int IDC_T3K_IR_CLEAR = 157;
 constexpr int IDC_T3K_PREVIEW_VOLUME = 158;
+constexpr int IDC_CLO_DESTINATION = 159;
 
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
@@ -179,6 +180,7 @@ int gT3kTotalPages = 1;
 int gT3kTotalResults = 0;
 std::string gT3kLastQuery;
 HWND gInputEdit = nullptr;
+HWND gDestinationCombo = nullptr;
 HWND gOutEdit = nullptr;
 HWND gLoadFileButton = nullptr;
 HWND gLoadFolderButton = nullptr;
@@ -312,13 +314,13 @@ void showControl(HWND h, bool show) {
 
 void showConversionUi(HWND hwnd, bool show) {
     const HWND controls[] = {
-        gInputEdit, gOutEdit, gLoadFileButton, gLoadFolderButton, gBrowseButton,
+        gDestinationCombo, gInputEdit, gOutEdit, gLoadFileButton, gLoadFolderButton, gBrowseButton,
         gConvertButton, gOpenButton, gTailCombo, gRecordedEdit, gBrowseRecordedButton,
         gCorrectiveCheck, gCorrectiveEdit, gBrowseCorrectiveButton, gRefineSourceCombo,
         gRefineTargetEdit, gBrowseRefineTargetButton, gInfo
     };
     for (HWND h : controls) showControl(h, show);
-    for (int id : {1002,1003,1005,1006,1008,1009,1010})
+    for (int id : {1002,1003,1005,1006,1008,1009,1010,1027})
         showControl(GetDlgItem(hwnd, id), show);
 }
 
@@ -903,7 +905,7 @@ void updateBackendUi() {
         setText(gSubtitle, L"Convert one NAM or batch-convert every NAM in a selected folder.");
         setText(gInfo,
             L"Place nam_input_wav.wav next to NamToClo.exe. The original stimulus is always used.\r\n"
-            L"Tail / Reamp and Corrective IR are optional. Tone Match is applied by default.");
+            L"Tail / Reamp and Corrective IR are optional. Tone Match always selects the best final-size candidate.");
         if (!gBusy) setText(gStatus, L"Ready to convert.");
     }
     if (hwnd) InvalidateRect(hwnd, nullptr, TRUE);
@@ -912,6 +914,7 @@ void updateBackendUi() {
 void enableControls(bool enable) {
     gBusy = !enable;
     EnableWindow(gBackendTabs, enable);
+    EnableWindow(gDestinationCombo, enable);
     EnableWindow(gLoadFileButton, enable);
     EnableWindow(gLoadFolderButton, enable);
     EnableWindow(gBrowseButton, enable);
@@ -1127,8 +1130,8 @@ void startConversion(HWND hwnd) {
     }
 
     ntc::CloRefineConfig refine;
-    refine.enabled = true;
-    refine.passes = 4;
+    refine.destination = SendMessageW(gDestinationCombo, CB_GETCURSEL, 0, 0) == 1
+        ? ntc::CloDestination::Gp5 : ntc::CloDestination::Gp200;
     const bool customToneMatch = SendMessageW(gRefineSourceCombo, CB_GETCURSEL, 0, 0) == 1;
     refine.referenceWav = customToneMatch ? fs::path(getText(gRefineTargetEdit)) : fs::path{};
     if (customToneMatch && refine.referenceWav.empty()) {
@@ -1329,6 +1332,8 @@ void layoutControls(HWND hwnd) {
 
     // Keep a visible gap between each label and its field/control.
     moveCtrl(GetDlgItem(hwnd, 1002), contentX, gUi.sectionInput.top + 8, 230, 20);
+    moveCtrl(GetDlgItem(hwnd, 1027), gUi.sectionInput.right - 346, gUi.sectionInput.top + 8, 58, 20);
+    moveCtrl(gDestinationCombo, gUi.sectionInput.right - 286, gUi.sectionInput.top + 4, 270, 120);
     const int inputButtonX = gUi.sectionInput.right - sectionRightInset - 244;
     const int inputEditW = inputButtonX - 12 - contentX;
     moveCtrl(gInputEdit, contentX, gUi.sectionInput.top + 35, inputEditW, 28);
@@ -1467,11 +1472,18 @@ void createUi(HWND hwnd) {
     TabCtrl_SetCurSel(gBackendTabs, 0);
 
     createSectionLabel(hwnd, 1002, L"Input NAM or folder");
+    createSectionLabel(hwnd, 1027, L"Target");
+    gDestinationCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+        0, 0, 270, 120, hwnd, controlId(IDC_CLO_DESTINATION), nullptr, nullptr);
+    applyFont(gDestinationCombo);
+    SendMessageW(gDestinationCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"GP-200 (B1024)"));
+    SendMessageW(gDestinationCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"GP-5 (B512)"));
+    SendMessageW(gDestinationCombo, CB_SETCURSEL, 0, 0);
     createSectionLabel(hwnd, 1003, L"Output folder");
     createSectionLabel(hwnd, 1005, L"Tail / Reamp source");
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
     createSectionLabel(hwnd, 1008, L"Corrective IR");
-    createSectionLabel(hwnd, 1009, L"Tone Match");
+    createSectionLabel(hwnd, 1009, L"Tone Match (automatic best candidate)");
     createSectionLabel(hwnd, 1010, L"Custom Tone Match reference WAV (first 20 s used)");
 
     gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
@@ -1844,7 +1856,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (ctrl == gSubtitle || ctrl == GetDlgItem(hwnd, 1001)
             || ctrl == GetDlgItem(hwnd, 1002) || ctrl == GetDlgItem(hwnd, 1003) || ctrl == GetDlgItem(hwnd, 1004)
             || ctrl == GetDlgItem(hwnd, 1005) || ctrl == GetDlgItem(hwnd, 1006) || ctrl == GetDlgItem(hwnd, 1007)
-            || ctrl == GetDlgItem(hwnd, 1008) || ctrl == GetDlgItem(hwnd, 1009) || ctrl == GetDlgItem(hwnd, 1010)
+            || ctrl == GetDlgItem(hwnd, 1027) || ctrl == GetDlgItem(hwnd, 1008) || ctrl == GetDlgItem(hwnd, 1009) || ctrl == GetDlgItem(hwnd, 1010)
             || ctrl == GetDlgItem(hwnd, 1011) || ctrl == GetDlgItem(hwnd, 1012) || ctrl == GetDlgItem(hwnd, 1013)
             || ctrl == GetDlgItem(hwnd, 1014) || ctrl == gUploaderDevice
             || ctrl == GetDlgItem(hwnd, 1015) || ctrl == GetDlgItem(hwnd, 1016)
@@ -2124,7 +2136,13 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         updateTailControls();
         if (r && r->ok) {
             preserveConvertedT3kNam(r->inputNam);
-            const std::wstring resultMessage = L"Conversion complete.\r\n\r\nGP-200 CLO 1024:\r\n" + r->gp2001024.wstring();
+            const std::wstring resultMessage = L"Conversion complete.\r\n\r\n" +
+                std::wstring(r->destination == ntc::CloDestination::Gp5 ? L"GP-5 CLO B512" : L"GP-200 CLO B1024") +
+                L":\r\n" + r->outputClo.wstring() +
+                L"\r\n\r\nSelected: " + (r->toneMatch.selectedConfidence ? std::wstring(L"with confidence") : std::wstring(L"without confidence")) +
+                L"\r\nSpectral RMSE (dB), without / with confidence: " +
+                std::to_wstring(r->toneMatch.withoutConfidenceRmseDb) + L" / " +
+                std::to_wstring(r->toneMatch.withConfidenceRmseDb);
             setText(gStatus, L"Done. CLO file generated successfully.");
             const std::wstring doneTitle = L"NAM to CLO";
             MessageBoxW(hwnd, resultMessage.c_str(), doneTitle.c_str(), MB_ICONINFORMATION | MB_OK);
