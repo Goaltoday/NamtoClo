@@ -61,8 +61,11 @@ void updateInternalCrc(std::array<std::uint8_t, physicalContainerBytes>& contain
     const auto declared = readLe32(container.data() + declaredOffset);
     const auto crc = crc16Modbus(container.data() + crcDataOffset,
                                  static_cast<std::size_t>(declared) - crcDataOffset);
-    container[crcOffset] = static_cast<std::uint8_t>(crc & 0xff);
-    container[crcOffset + 1] = static_cast<std::uint8_t>((crc >> 8) & 0xff);
+    // GP-200/Valeton CLO stores CRC16/MODBUS in byte-swapped wire order:
+    // high byte first, then low byte. This matches official GP-200 CLO files
+    // and the rest of the converter serialization paths.
+    container[crcOffset] = static_cast<std::uint8_t>((crc >> 8) & 0xff);
+    container[crcOffset + 1] = static_cast<std::uint8_t>(crc & 0xff);
 }
 
 bool prepareSoundCloneModelForGP200(const std::filesystem::path& sourceFile,
