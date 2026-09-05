@@ -31,11 +31,10 @@ int main(int argc,char** argv)try {
     namespace fs=std::filesystem;
     const fs::path dir=argc>1?argv[1]:"test-output";fs::create_directories(dir);
     std::string error;
-    // Confidence affects the curve itself. Confidence=0 gives an identity IR.
-    ntc::V26Comp comp;comp.f={40,18000};comp.raw={6,6};comp.conf={0,0};
-    auto raw=ntc::v26minPhaseIr(comp,false),weighted=ntc::v26minPhaseIr(comp,true);
+    // A flat +6 dB curve is synthesized directly, without weighting or smoothing.
+    ntc::V26Comp comp;comp.f={40,18000};comp.raw={6,6};
+    auto raw=ntc::v26minPhaseIr(comp);
     require(std::abs(raw[0]-std::pow(10.,6./20.))<1e-4,"raw curve changed");
-    require(std::abs(weighted[0]-1)<1e-5,"confidence not applied");
     std::vector<float> base(512,0),candidate;base[0]=1;
     require(ntc::correctedFinalB(base,{2.f},candidate),"gain correction invalid");
     require(candidate==base,"historical B normalization changed");
@@ -68,8 +67,7 @@ int main(int argc,char** argv)try {
         ntc::CloRefineConfig cfg;cfg.destination=dest;ntc::CloRefineStats stats;
         const auto taps=ntc::destinationBTaps(dest);auto output=dir/("final"+std::to_string(taps)+".clo");
         require(ntc::refineCloBOnly(dir/"source2048.clo",dir/"stimulus.wav",dir/"target.wav",output,cfg,error,{},&stats),error.c_str());
-        require(std::isfinite(stats.withoutConfidenceRmseDb)&&std::isfinite(stats.withConfidenceRmseDb),"candidate evaluation invalid");
-        require(stats.selectedConfidence==(stats.withConfidenceRmseDb<stats.withoutConfidenceRmseDb),"wrong winner");
+        require(std::isfinite(stats.finalRmseDb),"final measurement invalid");
         std::vector<std::uint8_t> bytes;require(ntc::readFileBytes(output,bytes,error),"read output");
         const auto declared=0x88+4*(128+taps);
         require(bytes.size()==(taps==1024?0x2288:declared),"physical size");
@@ -80,19 +78,19 @@ int main(int argc,char** argv)try {
         require(std::all_of(bytes.begin()+declared,bytes.end(),[](auto v){return v==0;}),"padding not zero");
         const auto cc=crc(bytes,declared);require(bytes[8]==cc>>8&&bytes[9]==(cc&255),"CRC byte order");
         ntc::Model finalModel;require(ntc::parseModel(bytes,finalModel,error),"final parse");
-        // Re-evaluate the serialized file, independently of the chosen candidate buffer.
+        // Re-evaluate the serialized file, independently of the direct correction buffer.
         std::vector<float> outputAudio;ntc::renderWithB(preB,finalModel.B,outputAudio,ntc::cloPlayerVolumeControlToLinear(50));
         std::vector<float> actualTail(outputAudio.begin()+50u*44100u,outputAudio.end());
         std::vector<float> expectedTail(target.begin()+50u*44100u,target.begin()+n);
         std::vector<float> baseAudio;ntc::renderWithB(preB,base,baseAudio,ntc::cloPlayerVolumeControlToLinear(50));
         std::vector<float> baseTail(baseAudio.begin()+50u*44100u,baseAudio.end());auto fixed=ntc::sharedWindows(baseTail,expectedTail);
         const double score=ntc::spectralRmse(ntc::v26analyse(actualTail,1,0,actualTail.size(),&fixed),ntc::v26analyse(expectedTail,1,0,expectedTail.size(),&fixed));
-        require(std::abs(score-std::min(stats.withoutConfidenceRmseDb,stats.withConfidenceRmseDb))<1e-5,"export differs from evaluated winner");
-        std::cout<<"B"<<taps<<" baseline="<<stats.baselineRmseDb<<" raw="<<stats.withoutConfidenceRmseDb<<" confidence="<<stats.withConfidenceRmseDb<<" selected="<<(stats.selectedConfidence?"confidence":"raw")<<" serialized="<<score<<" frames="<<stats.analysisFrames<<"\n";
+        require(std::abs(score-stats.finalRmseDb)<1e-5,"export differs from measured direct correction");
+        std::cout<<"B"<<taps<<" direct="<<stats.finalRmseDb<<" serialized="<<score<<" frames="<<stats.analysisFrames<<"\n";
     }
     ntc::CloRefineConfig cfg;ntc::CloRefineStats stats;
     wav(dir/"short.wav",std::vector<float>(100,0));
     require(!ntc::refineCloBOnly(dir/"source2048.clo",dir/"short.wav",dir/"target.wav",dir/"must_not_exist.clo",cfg,error),"short input accepted");
     require(!fs::exists(dir/"must_not_exist.clo"),"failed job wrote output");
-    std::cout<<"PASS: confidence, scoring, final sizes, CRC, preserved A/PK/biquads, guards, invalid input.\n";
+    std::cout<<"PASS: direct correction, measurement, final sizes, CRC, preserved A/PK/biquads, guards, invalid input.\n";
 }catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<"\n";return 1;}

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(NamToClo VERSION 2.10.0 LANGUAGES C CXX RC)
+project(NamToClo VERSION 2.10.1 LANGUAGES C CXX RC)
 
 if(NOT WIN32)
     message(FATAL_ERROR "NAM to CLO targets Windows x64.")
@@ -201,4 +201,4 @@ if(MSVC)
 endif()
 
 install(TARGETS NamToClo RUNTIME DESTINATION .)
-install(FILES README.md LICENSE THIRD_PARTY.md nam_input_wav.wav VERSION_2.10.0.md DESTINATION .)
+install(FILES README.md LICENSE THIRD_PARTY.md nam_input_wav.wav VERSION_2.10.1.md DESTINATION .)

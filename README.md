@@ -1,20 +1,18 @@
-# NAM to CLO v2.10.0
+# NAM to CLO v2.10.1
 
+## Current conversion flow (v2.10.1)
 
-## Current conversion flow (v2.10.0)
+NAM → original A128/B2048 conversion → optional Corrective IR on B2048 → destination B1024/B512 → one direct Tone Match correction → final CLO.
 
-NAM → original A128/B2048 conversion → optional Corrective IR on B2048 → truncate B to the selected destination → build and evaluate TWO Tone Match candidates → save the better final CLO.
+- GP-200 retains A128/B1024; GP-5 retains A128/B512.
+- No spectral confidence calculation or weighting, no comparison/selection between correction variants.
+- No 5% smoothing or replacement smoothing. The correction is directly target minus source in dB.
+- Historical B RMS normalization is retained; Tone Match post gain remains 0 dB.
+- Final spectral RMSE is diagnostic only. It never selects another correction or changes the export.
+- Corrective IR is still applied to the NAM target with the same effective gain as before.
+- Initial trainer, target selector, preview and upload protocols remain unchanged.
 
-- **GP-200:** A128/B1024, historical padded physical container (0x2288), declared size 0x1288.
-- **GP-5:** A128/B512, physical/declared size 0x0A88.
-- No 5% smoothing. Raw candidate uses target-source dB; confidence candidate multiplies that curve by spectral confidence.
-- Both candidates start independently from the same truncated model and retain the historical B RMS normalization with 0 dB Tone Match post gain.
-- Winner: lowest unweighted spectral RMSE in dB over the same 512 log-spaced frequencies (40–18000 Hz) and the same informative windows from seconds 50–70. Deterministic ties select the raw candidate.
-- Each candidate is evaluated AFTER convolution, destination truncation and normalization. Nothing changes the winning coefficients afterwards.
-- Selection is relative to the selected reference, not a guarantee of universally better sound. The baseline score is diagnostic; only the two requested Tone Match variants compete.
-- Corrective IR is also applied to the NAM target with the same effective gain, as before.
-
-See [VERSION_2.10.0.md](VERSION_2.10.0.md) for changes, validation and installation. This section supersedes descriptions of older Tone Match behavior retained below.
+See [VERSION_2.10.1.md](VERSION_2.10.1.md) for this release. Older notes below and VERSION_2.10.0.md are historical and do not override this flow.
 
 Windows x64 application for converting Neural Amp Modeler (`.nam`) models to CLO files and uploading CLO files directly to Valeton GP-200 and GP-5 devices over USB MIDI.
 

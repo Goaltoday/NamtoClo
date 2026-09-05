@@ -905,7 +905,7 @@ void updateBackendUi() {
         setText(gSubtitle, L"Convert one NAM or batch-convert every NAM in a selected folder.");
         setText(gInfo,
             L"Place nam_input_wav.wav next to NamToClo.exe. The original stimulus is always used.\r\n"
-            L"Tail / Reamp and Corrective IR are optional. Tone Match always selects the best final-size candidate.");
+            L"Tail / Reamp and Corrective IR are optional. Tone Match applies a direct correction at the final size.");
         if (!gBusy) setText(gStatus, L"Ready to convert.");
     }
     if (hwnd) InvalidateRect(hwnd, nullptr, TRUE);
@@ -1483,7 +1483,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1005, L"Tail / Reamp source");
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
     createSectionLabel(hwnd, 1008, L"Corrective IR");
-    createSectionLabel(hwnd, 1009, L"Tone Match (automatic best candidate)");
+    createSectionLabel(hwnd, 1009, L"Tone Match (direct correction)");
     createSectionLabel(hwnd, 1010, L"Custom Tone Match reference WAV (first 20 s used)");
 
     gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
@@ -2139,10 +2139,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             const std::wstring resultMessage = L"Conversion complete.\r\n\r\n" +
                 std::wstring(r->destination == ntc::CloDestination::Gp5 ? L"GP-5 CLO B512" : L"GP-200 CLO B1024") +
                 L":\r\n" + r->outputClo.wstring() +
-                L"\r\n\r\nSelected: " + (r->toneMatch.selectedConfidence ? std::wstring(L"with confidence") : std::wstring(L"without confidence")) +
-                L"\r\nSpectral RMSE (dB), without / with confidence: " +
-                std::to_wstring(r->toneMatch.withoutConfidenceRmseDb) + L" / " +
-                std::to_wstring(r->toneMatch.withConfidenceRmseDb);
+                L"\r\n\r\nTone Match: direct correction" +
+                L"\r\nFinal spectral RMSE (dB): " + std::to_wstring(r->toneMatch.finalRmseDb);
             setText(gStatus, L"Done. CLO file generated successfully.");
             const std::wstring doneTitle = L"NAM to CLO";
             MessageBoxW(hwnd, resultMessage.c_str(), doneTitle.c_str(), MB_ICONINFORMATION | MB_OK);

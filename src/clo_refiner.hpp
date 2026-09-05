@@ -16,10 +16,7 @@ constexpr std::size_t destinationBTaps(CloDestination destination) {
 }
 
 struct CloRefineStats {
-    double withoutConfidenceRmseDb = std::numeric_limits<double>::infinity();
-    double withConfidenceRmseDb = std::numeric_limits<double>::infinity();
-    double baselineRmseDb = std::numeric_limits<double>::infinity();
-    bool selectedConfidence = false;
+    double finalRmseDb = std::numeric_limits<double>::infinity();
     std::size_t analysisFrames = 0;
 };
 
@@ -35,9 +32,9 @@ struct CloRefineConfig {
 
 using RefineStatusCallback = std::function<void(const std::wstring&)>;
 
-// Always compare two Tone Match candidates on final B1024/B512 (A stays 128).
-// Both start from the same truncated model and use a common, unweighted dB RMSE.
-// The selected final CLO is serialized directly, with no later DSP or truncation.
+// Always apply one direct Tone Match correction on final B1024/B512 (A stays 128).
+// No confidence calculation/weighting, smoothing or candidate selection.
+// The final CLO is serialized directly, with no later DSP or truncation.
 bool refineCloBOnly(const fs::path& inputClo2048,
                     const fs::path& stimulusWav,
                     const fs::path& targetWav,

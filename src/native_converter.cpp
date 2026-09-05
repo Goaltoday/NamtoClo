@@ -1786,7 +1786,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
     const bool gp5=refine.destination==CloDestination::Gp5;
     r.outputClo=uniqueOutput(outputDirectory,inputNam.stem().wstring(),
         gp5?L"_NATIVE_GP5_512_TONEMATCH.clo":L"_NATIVE_GP200_1024_TONEMATCH.clo");
-    // The candidate has already been rendered/evaluated at exactly this size.
+    // The direct correction has already been rendered at exactly this size.
     // Move it unchanged: no second compacting, normalization or DSP stage.
     fs::rename(finalClo,r.outputClo,ec);
     if(ec){r.error="Cannot publish final CLO: "+ec.message();fs::remove_all(work,ec);return r;}
