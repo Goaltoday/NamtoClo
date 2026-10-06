@@ -27,7 +27,9 @@ std::wstring lower(std::wstring s) {
 bool looksLikeGp5(const std::wstring& name) {
     const auto n = lower(name);
     return n.find(L"gp-5") != std::wstring::npos
-        || n.find(L"gp5") != std::wstring::npos;
+        || n.find(L"gp5") != std::wstring::npos
+        || n.find(L"gp-50") != std::wstring::npos
+        || n.find(L"gp50") != std::wstring::npos;
 }
 
 std::wstring mmError(MMRESULT code, bool input) {
@@ -71,7 +73,7 @@ public:
                                 reinterpret_cast<DWORD_PTR>(&MidiSession::midiInCallback),
                                 reinterpret_cast<DWORD_PTR>(this), CALLBACK_FUNCTION);
         if (r != MMSYSERR_NOERROR) {
-            error = L"Cannot open GP-5 MIDI input: " + mmError(r, true);
+            error = L"Cannot open GP-5/GP-50 MIDI input: " + mmError(r, true);
             midiIn_ = nullptr;
             return false;
         }
@@ -84,14 +86,14 @@ public:
             h.dwBufferLength = static_cast<DWORD>(inputBuffers_[i].size());
             r = midiInPrepareHeader(midiIn_, &h, sizeof(h));
             if (r != MMSYSERR_NOERROR) {
-                error = L"Cannot prepare GP-5 MIDI input buffer: " + mmError(r, true);
+                error = L"Cannot prepare GP-5/GP-50 MIDI input buffer: " + mmError(r, true);
                 close();
                 return false;
             }
             preparedInputs_ = i + 1;
             r = midiInAddBuffer(midiIn_, &h, sizeof(h));
             if (r != MMSYSERR_NOERROR) {
-                error = L"Cannot queue GP-5 MIDI input buffer: " + mmError(r, true);
+                error = L"Cannot queue GP-5/GP-50 MIDI input buffer: " + mmError(r, true);
                 close();
                 return false;
             }
@@ -99,14 +101,14 @@ public:
 
         r = midiInStart(midiIn_);
         if (r != MMSYSERR_NOERROR) {
-            error = L"Cannot start GP-5 MIDI input: " + mmError(r, true);
+            error = L"Cannot start GP-5/GP-50 MIDI input: " + mmError(r, true);
             close();
             return false;
         }
 
         r = midiOutOpen(&midiOut_, d.outputId, 0, 0, CALLBACK_NULL);
         if (r != MMSYSERR_NOERROR) {
-            error = L"Cannot open GP-5 MIDI output: " + mmError(r, false);
+            error = L"Cannot open GP-5/GP-50 MIDI output: " + mmError(r, false);
             midiOut_ = nullptr;
             close();
             return false;
@@ -116,7 +118,7 @@ public:
 
     bool sendSysEx(const std::vector<std::uint8_t>& bytes, std::wstring& error) {
         if (!midiOut_ || bytes.empty()) {
-            error = L"GP-5 MIDI output is not open.";
+            error = L"GP-5/GP-50 MIDI output is not open.";
             return false;
         }
 
@@ -126,14 +128,14 @@ public:
 
         MMRESULT r = midiOutPrepareHeader(midiOut_, &hdr, sizeof(hdr));
         if (r != MMSYSERR_NOERROR) {
-            error = L"Cannot prepare GP-5 MIDI SysEx: " + mmError(r, false);
+            error = L"Cannot prepare GP-5/GP-50 MIDI SysEx: " + mmError(r, false);
             return false;
         }
 
         r = midiOutLongMsg(midiOut_, &hdr, sizeof(hdr));
         if (r != MMSYSERR_NOERROR) {
             midiOutUnprepareHeader(midiOut_, &hdr, sizeof(hdr));
-            error = L"Cannot send GP-5 MIDI SysEx: " + mmError(r, false);
+            error = L"Cannot send GP-5/GP-50 MIDI SysEx: " + mmError(r, false);
             return false;
         }
 
@@ -142,7 +144,7 @@ public:
             if (std::chrono::steady_clock::now() >= deadline) {
                 midiOutReset(midiOut_);
                 midiOutUnprepareHeader(midiOut_, &hdr, sizeof(hdr));
-                error = L"Timed out while sending GP-5 MIDI SysEx.";
+                error = L"Timed out while sending GP-5/GP-50 MIDI SysEx.";
                 return false;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -269,9 +271,9 @@ std::wstring describeDetection(const MidiDetection& d) {
         if (d.inputName == d.outputName) return L"Detected: " + d.outputName;
         return L"Detected IN: " + d.inputName + L" | OUT: " + d.outputName;
     }
-    if (d.inputFound) return L"GP-5 MIDI input found, but MIDI output is missing.";
-    if (d.outputFound) return L"GP-5 MIDI output found, but MIDI input is missing.";
-    return L"GP-5 MIDI not detected. Connect the pedal and press Rescan.";
+    if (d.inputFound) return L"GP-5/GP-50 MIDI input found, but MIDI output is missing.";
+    if (d.outputFound) return L"GP-5/GP-50 MIDI output found, but MIDI input is missing.";
+    return L"GP-5/GP-50 MIDI not detected. Connect the pedal and press Rescan.";
 }
 
 UploadResult uploadCloToGp5(const std::filesystem::path& cloFile,
@@ -310,24 +312,24 @@ UploadResult uploadCloToGp5(const std::filesystem::path& cloFile,
         }
         if (!acknowledged) {
             std::wstringstream ss;
-            ss << L"Upload failed: GP-5 ACK timeout at block " << (i + 1) << L" / " << total << L".";
+            ss << L"Upload failed: GP-5/GP-50 ACK timeout at block " << (i + 1) << L" / " << total << L".";
             return { false, ss.str() };
         }
 
         if (progress) {
             std::wstringstream ss;
-            ss << L"Uploading GP-5 block " << (i + 1) << L" / " << total << L"...";
+            ss << L"Uploading GP-5/GP-50 block " << (i + 1) << L" / " << total << L"...";
             progress(i + 1, total, ss.str());
         }
         // Captures advance after the ACK with only a very small gap.
         if (i + 1 < total) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    if (progress) progress(total, total, L"Waiting for GP-5 final confirmation...");
+    if (progress) progress(total, total, L"Waiting for GP-5/GP-50 final confirmation...");
     if (!session.waitForCompletion(std::chrono::milliseconds(2000)))
-        return { false, L"All blocks were acknowledged, but the GP-5 final confirmation timed out." };
+        return { false, L"All blocks were acknowledged, but the GP-5/GP-50 final confirmation timed out." };
 
-    return { true, L"GP-5 SnapTone upload completed successfully." };
+    return { true, L"GP-5/GP-50 SnapTone upload completed successfully." };
 }
 
 } // namespace ntc::gp5

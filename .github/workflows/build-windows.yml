@@ -14,12 +14,15 @@ jobs:
         run: cmake -S . -B build -A x64
       - name: Build
         run: cmake --build build --config Release --parallel 1 --verbose
+      - name: Test final-size Tone Match
+        run: |
+          cmake -S tests -B build-tests -A x64
+          cmake --build build-tests --config Release
+          ctest --test-dir build-tests -C Release --output-on-failure
       - name: Stage app
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item build/Release/NamToClo.exe dist/NamToClo.exe
-          Copy-Item README.md,LICENSE,THIRD_PARTY.md dist/
+          cmake --install build --config Release --prefix dist
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

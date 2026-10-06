@@ -1666,12 +1666,57 @@ std::vector<float> prepareToneTarget44100(const std::vector<float>&renderedWithG
 
 fs::path uniqueOutput(const fs::path&dir,const std::wstring&stem,const wchar_t*suffix){fs::path p=dir/(stem+suffix);int i=2;while(fs::exists(p))p=dir/(stem+L"_"+std::to_wstring(i++)+suffix);return p;}
 
+bool readPreviewWavMono(const fs::path& path,std::vector<float>& mono,std::uint32_t& sampleRate,std::string& error){
+    mono.clear();sampleRate=0;std::ifstream in(path,std::ios::binary);if(!in){error="Cannot open preview WAV: "+pathToUtf8(path);return false;}
+    char riff[12]{};in.read(riff,12);if(in.gcount()!=12||std::memcmp(riff,"RIFF",4)!=0||std::memcmp(riff+8,"WAVE",4)!=0){error="Preview audio is not a RIFF/WAVE file.";return false;}
+    std::uint16_t format=0,channels=0,bits=0,blockAlign=0;std::vector<std::uint8_t> data;
+    while(in){char id[4]{};char szb[4]{};in.read(id,4);if(in.gcount()!=4)break;in.read(szb,4);if(in.gcount()!=4)break;const std::uint32_t size=le32(reinterpret_cast<const std::uint8_t*>(szb));
+        if(std::memcmp(id,"fmt ",4)==0){std::vector<std::uint8_t> f(size);if(size)in.read(reinterpret_cast<char*>(f.data()),size);if(f.size()<16){error="Invalid preview WAV fmt chunk.";return false;}format=le16(f.data());channels=le16(f.data()+2);sampleRate=le32(f.data()+4);blockAlign=le16(f.data()+12);bits=le16(f.data()+14);if(format==0xfffe&&f.size()>=26)format=le16(f.data()+24);}
+        else if(std::memcmp(id,"data",4)==0){data.resize(size);if(size)in.read(reinterpret_cast<char*>(data.data()),size);}else in.seekg(size,std::ios::cur);
+        if(size&1u)in.seekg(1,std::ios::cur);
+    }
+    if((format!=1&&format!=3)||channels==0||sampleRate==0||blockAlign==0||data.empty()){error="Preview WAV must be PCM or IEEE-float audio.";return false;}
+    const std::size_t frames=data.size()/blockAlign;if(frames==0){error="Preview WAV contains no audio.";return false;}mono.resize(frames);
+    auto sampleAt=[&](const std::uint8_t* p)->float{
+        if(format==3&&bits==32){float v=0;std::memcpy(&v,p,4);return std::isfinite(v)?v:0.0f;}
+        if(format==3&&bits==64){double v=0;std::memcpy(&v,p,8);return std::isfinite(v)?static_cast<float>(v):0.0f;}
+        if(format==1&&bits==8)return (static_cast<int>(*p)-128)/128.0f;
+        if(format==1&&bits==16){const auto v=static_cast<std::int16_t>(le16(p));return static_cast<float>(v/32768.0f);}
+        if(format==1&&bits==24){std::int32_t v=static_cast<std::int32_t>(p[0]|(p[1]<<8)|(p[2]<<16));if(v&0x800000)v|=~0xffffff;return static_cast<float>(v/8388608.0f);}
+        if(format==1&&bits==32){const auto u=le32(p);const auto v=static_cast<std::int32_t>(u);return static_cast<float>(static_cast<double>(v)/2147483648.0);}
+        return 0.0f;
+    };
+    const std::size_t bytesPerSample=(bits+7u)/8u;if(bytesPerSample==0||blockAlign<bytesPerSample*channels){error="Unsupported preview WAV layout.";return false;}
+    if(!((format==1&&(bits==8||bits==16||bits==24||bits==32))||(format==3&&(bits==32||bits==64)))){error="Unsupported preview WAV bit depth.";return false;}
+    for(std::size_t i=0;i<frames;++i){const auto* frame=data.data()+i*blockAlign;double sum=0;for(std::uint16_t c=0;c<channels;++c)sum+=sampleAt(frame+c*bytesPerSample);mono[i]=static_cast<float>(sum/channels);}return true;
+}
+
+bool writeMonoPcm16Wav(const fs::path& path,const std::vector<float>& samples,std::uint32_t sampleRate,std::string& error){
+    if(sampleRate==0){error="Cannot write preview WAV with sample rate 0.";return false;}std::error_code ec;if(path.has_parent_path())fs::create_directories(path.parent_path(),ec);if(ec){error="Cannot create preview directory: "+ec.message();return false;}
+    std::ofstream o(path,std::ios::binary|std::ios::trunc);if(!o){error="Cannot create preview WAV: "+pathToUtf8(path);return false;}if(samples.size()>((std::numeric_limits<std::uint32_t>::max()-36u)/2u)){error="Preview WAV is too large.";return false;}
+    const std::uint32_t dataBytes=static_cast<std::uint32_t>(samples.size()*2u),riffSize=36u+dataBytes,byteRate=sampleRate*2u;auto w16=[&](std::uint16_t v){char b[2]={static_cast<char>(v&255u),static_cast<char>((v>>8)&255u)};o.write(b,2);};auto w32=[&](std::uint32_t v){char b[4]={static_cast<char>(v&255u),static_cast<char>((v>>8)&255u),static_cast<char>((v>>16)&255u),static_cast<char>((v>>24)&255u)};o.write(b,4);};
+    o.write("RIFF",4);w32(riffSize);o.write("WAVEfmt ",8);w32(16);w16(1);w16(1);w32(sampleRate);w32(byteRate);w16(2);w16(16);o.write("data",4);w32(dataBytes);for(float x:samples){if(!std::isfinite(x))x=0.0f;x=std::clamp(x,-1.0f,1.0f);const auto v=static_cast<std::int16_t>(std::lrint(x*32767.0f));w16(static_cast<std::uint16_t>(v));}if(!o){error="Failed while writing preview WAV.";return false;}return true;
+}
+
 } // namespace
+
+bool renderNamPreviewToWav(const fs::path& inputNam,const fs::path& inputWav,const fs::path& outputWav,std::string& error){
+    error.clear();std::error_code ec;if(!fs::exists(inputNam,ec)||ec){error="Preview NAM does not exist.";return false;}if(!fs::exists(inputWav,ec)||ec){error="Selected preview WAV does not exist.";return false;}
+    std::vector<float> source;std::uint32_t sourceRate=0;if(!readPreviewWavMono(inputWav,source,sourceRate,error))return false;
+    const fs::path work=outputWav.parent_path()/(L".preview_model_"+inputNam.stem().wstring());fs::remove_all(work,ec);fs::create_directories(work,ec);if(ec){error="Cannot create preview work directory.";return false;}
+    fs::path modelPath;if(!prepareFullA2(inputNam,work,modelPath,error)){fs::remove_all(work,ec);return false;}
+    try{
+        auto dsp=nam::get_dsp(modelPath);if(!dsp){error="NeuralAmpModelerCore could not load the preview NAM.";fs::remove_all(work,ec);return false;}double rate=dsp->GetExpectedSampleRate();if(!(rate>1000.0&&rate<384000.0))rate=48000.0;
+        auto input=std::abs(rate-static_cast<double>(sourceRate))<0.5?source:resampleR8Brain24(source,static_cast<double>(sourceRate),rate);std::vector<float> output(input.size(),0.0f);constexpr int block=1024;dsp->Reset(rate,block);std::vector<NAM_SAMPLE> ib(block),ob(block);NAM_SAMPLE* ip[1]={ib.data()};NAM_SAMPLE* op[1]={ob.data()};
+        for(std::size_t pos=0;pos<input.size();pos+=block){const int n=static_cast<int>(std::min<std::size_t>(block,input.size()-pos));for(int i=0;i<n;++i)ib[static_cast<std::size_t>(i)]=static_cast<NAM_SAMPLE>(input[pos+static_cast<std::size_t>(i)]);dsp->process(ip,op,n);for(int i=0;i<n;++i){float y=static_cast<float>(ob[static_cast<std::size_t>(i)]);output[pos+static_cast<std::size_t>(i)]=std::isfinite(y)?y:0.0f;}}
+        const bool ok=writeMonoPcm16Wav(outputWav,output,static_cast<std::uint32_t>(std::llround(rate)),error);fs::remove_all(work,ec);return ok;
+    }catch(const std::exception& e){error=std::string("NAM preview renderer: ")+e.what();fs::remove_all(work,ec);return false;}
+}
 
 ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& outputDirectory,
                                              StimulusConfig stimulus,CorrectiveIrConfig correction,CloRefineConfig refine,
                                              NativeConverterConfig trainer,const StatusCallback& status){
-    ConversionResult r;r.inputNam=inputNam;std::string error;std::error_code ec;
+    ConversionResult r;r.inputNam=inputNam;r.destination=refine.destination;std::string error;std::error_code ec;
     if(!fs::exists(inputNam,ec)||ec){r.error="Input NAM does not exist.";return r;}
     fs::create_directories(outputDirectory,ec);if(ec){r.error="Cannot create output directory: "+ec.message();return r;}
 
@@ -1694,7 +1739,6 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
 
     const fs::path original2048=work/L"native_original_2048.clo";if(!serialize2048(original2048,m,sr,error)){r.error=error;fs::remove_all(work,ec);return r;}
 
-    fs::path sourceForOutput=original2048;
     fs::path corrected2048;
     CorrectiveIrStats correctiveStats;
     std::vector<float> correctiveIr;
@@ -1705,11 +1749,10 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
         if(!loadCorrectiveIrSamples(correction.wav,correctiveIr,error)){r.error=error.empty()?"Corrective IR failed.":error;fs::remove_all(work,ec);return r;}
         if(!applyCorrectiveIrToClo(original2048,correctiveIr,corrected2048,correctiveStats,error)){r.error=error.empty()?"Corrective IR failed.":error;fs::remove_all(work,ec);return r;}
         report(status,L"Corrective IR applied: linear convolution, RMS match, -6 dB post gain. RMS gain "+std::to_wstring(correctiveStats.rmsGainDb)+L" dB; total "+std::to_wstring(correctiveStats.totalGainDb)+L" dB.");
-        sourceForOutput=corrected2048;
     }
 
-    fs::path toneMatched2048;
-    if(refine.enabled){
+    const fs::path finalClo=work/L"native_final_TONEMATCH.clo";
+    {
         report(status,L"Tone Match: preparing matched NAM target...");
         fs::path refineStimulus=stim;
         std::vector<float> refineTarget44100=toneTarget44100;
@@ -1736,19 +1779,17 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
         }
 
         const fs::path targetWav=work/L"refine_nam_output.wav";if(!writeMonoFloat32Wav(targetWav,refineTarget44100,44100,error)){r.error=error;fs::remove_all(work,ec);return r;}
-        toneMatched2048=work/L"native_2048_TONEMATCH.clo";
         CloRefineConfig refineRun=refine;
-        if(!refineCloBOnly(toneMatchInputClo,refineStimulus,targetWav,toneMatched2048,refineRun,error,status)){r.error=error.empty()?"CLO refinement failed.":error;fs::remove_all(work,ec);return r;}
+        if(!refineCloBOnly(toneMatchInputClo,refineStimulus,targetWav,finalClo,refineRun,error,status,&r.toneMatch)){r.error=error.empty()?"CLO refinement failed.":error;fs::remove_all(work,ec);return r;}
     }
 
-    if(refine.enabled){
-        report(status,L"Generating Tone Match GP-200 1024 CLO...");
-        r.gp2001024=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_GP200_1024_TONEMATCH.clo");
-        if(!makeGp200CompactClo(toneMatched2048,r.gp2001024,error)){r.error=error;fs::remove_all(work,ec);return r;}
-    }else{
-        r.gp2001024=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_GP200_1024.clo");
-        if(!makeGp200CompactClo(sourceForOutput,r.gp2001024,error)){r.error=error;fs::remove_all(work,ec);return r;}
-    }
+    const bool gp5=refine.destination==CloDestination::Gp5;
+    r.outputClo=uniqueOutput(outputDirectory,inputNam.stem().wstring(),
+        gp5?L"_NATIVE_GP5_512_TONEMATCH.clo":L"_NATIVE_GP200_1024_TONEMATCH.clo");
+    // The direct correction has already been rendered at exactly this size.
+    // Move it unchanged: no second compacting, normalization or DSP stage.
+    fs::rename(finalClo,r.outputClo,ec);
+    if(ec){r.error="Cannot publish final CLO: "+ec.message();fs::remove_all(work,ec);return r;}
     fs::remove_all(work,ec);r.ok=true;report(status,L"Conversion complete.");return r;
 }
 

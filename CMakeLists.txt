@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(NamToClo VERSION 2.7.0 LANGUAGES C CXX RC)
+project(NamToClo VERSION 2.10.1 LANGUAGES C CXX RC)
 
 if(NOT WIN32)
     message(FATAL_ERROR "NAM to CLO targets Windows x64.")
@@ -31,13 +31,18 @@ add_executable(NamToClo WIN32
     src/gp5_clo_upload.hpp
     src/gp5_midi.cpp
     src/gp5_midi.hpp
+    src/tone3000_client.cpp
+    src/tone3000_client.hpp
+    src/nam_preview_player.cpp
+    src/nam_preview_player.hpp
     src/resources.rc
     src/resource.h
 )
 
 target_compile_features(NamToClo PRIVATE cxx_std_20)
 target_compile_definitions(NamToClo PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
-target_link_libraries(NamToClo PRIVATE comdlg32 shell32 ole32 dbghelp advapi32 comctl32 winmm)
+# winmm also provides the v2.9.1 buffered real-time NAM preview output.
+target_link_libraries(NamToClo PRIVATE comdlg32 shell32 ole32 dbghelp advapi32 comctl32 winmm winhttp bcrypt ws2_32 crypt32)
 
 if(NAM_CORE_SOURCE_DIR)
     set(_ntc_namcore_dir "${NAM_CORE_SOURCE_DIR}")
@@ -145,6 +150,10 @@ target_sources(NamToClo PRIVATE
     "${_ntc_ooura_dir}/src/fft4g.c"
 )
 target_include_directories(NamToClo PRIVATE "${_ntc_ooura_dir}/src")
+# Tone3000 client uses the nlohmann JSON headers bundled with NAMCore.
+# Add it explicitly to the executable target; OBJECT-library usage does not
+# reliably propagate this include directory with all CMake/MSVC combinations.
+target_include_directories(NamToClo PRIVATE "${_ntc_namcore_dir}/Dependencies/nlohmann")
 # r8brain releases before v7 are not fully header-only; the historical
 # template-era branch used by the official converter ships r8bbase.cpp.
 # Build that third-party translation unit separately so our /W4 policy does
@@ -192,4 +201,4 @@ if(MSVC)
 endif()
 
 install(TARGETS NamToClo RUNTIME DESTINATION .)
-install(FILES README.md LICENSE THIRD_PARTY.md DESTINATION .)
+install(FILES README.md LICENSE THIRD_PARTY.md nam_input_wav.wav VERSION_2.10.1.md DESTINATION .)

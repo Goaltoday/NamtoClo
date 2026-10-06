@@ -95,7 +95,7 @@ bool makeGp5CompactClo(const std::filesystem::path& source,
     std::vector<std::uint8_t> sourceData;
     if (!readFile(source, sourceData, error)) return false;
     if (sourceData.size() < gp5DeclaredBytes) {
-        error = L"The CLO file is too small for an A128/B512 GP-5 model.";
+        error = L"The CLO file is too small for an A128/B512 GP-5/GP-50 model.";
         return false;
     }
 
@@ -117,7 +117,7 @@ bool makeGp5CompactClo(const std::filesystem::path& source,
     const auto startB = readLe32(sourceData.data() + startBOffset);
     const auto countB = readLe32(sourceData.data() + countBOffset);
     if (startA != 0u || countA != blockATaps || startB != blockATaps || countB < gp5BlockBTaps) {
-        error = L"Unsupported CLO structure. GP-5 upload requires A=128 and at least 512 B taps.";
+        error = L"Unsupported CLO structure. GP-5/GP-50 upload requires A=128 and at least 512 B taps.";
         return false;
     }
 
@@ -200,7 +200,7 @@ bool buildCloUpload(const std::filesystem::path& cloFile,
     // Only the experimentally validated user SnapTone range is exposed:
     // visible SnapTone 51..80 == zero-based protocol slots 50..79.
     if (slot < 50 || slot >= 80) {
-        error = L"The GP-5 destination must be SnapTone 51-80.";
+        error = L"The GP-5/GP-50 destination must be SnapTone 51-80.";
         return false;
     }
 
@@ -227,7 +227,7 @@ bool buildCloUpload(const std::filesystem::path& cloFile,
     for (std::size_t offset = 0; offset < stream.size(); offset += chunkPayloadBytes, ++sequence) {
         const std::size_t amount = std::min(chunkPayloadBytes, stream.size() - offset);
         if (sequence > 0xFFu) {
-            error = L"GP-5 transfer generated too many chunks.";
+            error = L"GP-5/GP-50 transfer generated too many chunks.";
             return false;
         }
         result.chunks.push_back(makeTransferFrame(static_cast<std::uint8_t>(sequence),
@@ -235,7 +235,7 @@ bool buildCloUpload(const std::filesystem::path& cloFile,
     }
 
     if (result.chunks.size() != 146u) {
-        error = L"Internal GP-5 transfer size mismatch (expected 146 chunks).";
+        error = L"Internal GP-5/GP-50 transfer size mismatch (expected 146 chunks).";
         return false;
     }
 

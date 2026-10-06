@@ -1,0 +1,12 @@
+NamToClo v2.10.1 — apply over v2.10.0
+
+CMakeLists.txt
+README.md
+VERSION_2.10.1.md
+src/clo_refiner.cpp
+src/clo_refiner.hpp
+src/common.hpp
+src/gui.cpp
+src/native_converter.cpp
+tests/final_tonematch_test.cpp
+CHANGED_FILES.txt

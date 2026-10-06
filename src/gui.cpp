@@ -2,19 +2,30 @@
 #include "common.hpp"
 #include "gp200_midi.hpp"
 #include "gp5_midi.hpp"
+#include "tone3000_client.hpp"
+#include "nam_preview_player.hpp"
 #include "resource.h"
 
 #include <windows.h>
+#include <mmsystem.h>
+#include <dpapi.h>
 #include <commdlg.h>
 #include <commctrl.h>
 #include <shlobj.h>
 #include <shellapi.h>
 
+#include <algorithm>
+#include <array>
+#include <cwchar>
 #include <filesystem>
 #include <cwctype>
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
+#include <mutex>
+#include <set>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -27,6 +38,12 @@ constexpr UINT WM_APP_UPLOAD_PROGRESS = WM_APP + 4;
 constexpr UINT WM_APP_UPLOAD_DONE = WM_APP + 5;
 constexpr UINT WM_APP_GP5_UPLOAD_PROGRESS = WM_APP + 6;
 constexpr UINT WM_APP_GP5_UPLOAD_DONE = WM_APP + 7;
+constexpr UINT WM_APP_T3K_AUTH_DONE = WM_APP + 8;
+constexpr UINT WM_APP_T3K_SEARCH_DONE = WM_APP + 9;
+constexpr UINT WM_APP_T3K_MODELS_DONE = WM_APP + 10;
+constexpr UINT WM_APP_T3K_DOWNLOAD_DONE = WM_APP + 11;
+constexpr UINT WM_APP_T3K_AUTOLOGIN_DONE = WM_APP + 12;
+constexpr UINT WM_APP_T3K_PREVIEW_DONE = WM_APP + 13;
 constexpr int IDC_INPUT_PATH = 101;
 constexpr int IDC_LOAD_FILE = 102;
 constexpr int IDC_LOAD_FOLDER = 103;
@@ -47,6 +64,7 @@ constexpr int IDC_BROWSE_CORRECTIVE_IR = 120;
 constexpr int IDC_REFINE_CLO = 121;
 constexpr int IDC_REFINE_TARGET_PATH = 122;
 constexpr int IDC_BROWSE_REFINE_TARGET = 123;
+constexpr int IDC_REFINE_SOURCE = 160; // distinct from Cabinet IR edit (155)
 constexpr int IDC_BACKEND_TABS = 124;
 constexpr int IDC_UPLOADER_CLO_PATH = 125;
 constexpr int IDC_UPLOADER_BROWSE = 126;
@@ -62,6 +80,27 @@ constexpr int IDC_GP5_RESCAN = 135;
 constexpr int IDC_GP5_UPLOAD = 136;
 constexpr int IDC_GP5_DEVICE = 137;
 constexpr int IDC_GP5_PROGRESS = 138;
+constexpr int IDC_T3K_KEY = 139;
+constexpr int IDC_T3K_CONNECT = 140;
+constexpr int IDC_T3K_SEARCH = 141;
+constexpr int IDC_T3K_SEARCH_BUTTON = 142;
+constexpr int IDC_T3K_RESULTS = 143;
+constexpr int IDC_T3K_MODELS = 144;
+constexpr int IDC_T3K_USE = 145;
+constexpr int IDC_T3K_STATE = 146;
+constexpr int IDC_T3K_PREVIOUS = 147;
+constexpr int IDC_T3K_PAGE = 148;
+constexpr int IDC_T3K_NEXT = 149;
+constexpr int IDC_T3K_SORT = 150;
+constexpr int IDC_T3K_PREVIEW_PLAY = 151;
+constexpr int IDC_T3K_PREVIEW_STOP = 152;
+constexpr int IDC_T3K_PREVIEW_WAV = 153;
+constexpr int IDC_T3K_PREVIEW_BROWSE = 154;
+constexpr int IDC_T3K_IR_WAV = 155;
+constexpr int IDC_T3K_IR_BROWSE = 156;
+constexpr int IDC_T3K_IR_CLEAR = 157;
+constexpr int IDC_T3K_PREVIEW_VOLUME = 158;
+constexpr int IDC_CLO_DESTINATION = 159;
 
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
@@ -106,7 +145,42 @@ HWND gGp5RescanButton = nullptr;
 HWND gGp5UploadButton = nullptr;
 HWND gGp5Device = nullptr;
 HWND gGp5Progress = nullptr;
+HWND gT3kKey = nullptr;
+HWND gT3kConnect = nullptr;
+HWND gT3kSearch = nullptr;
+HWND gT3kSearchButton = nullptr;
+HWND gT3kResults = nullptr;
+HWND gT3kModels = nullptr;
+HWND gT3kUse = nullptr;
+HWND gT3kState = nullptr;
+HWND gT3kPrevious = nullptr;
+HWND gT3kPageLabel = nullptr;
+HWND gT3kNext = nullptr;
+HWND gT3kSort = nullptr;
+HWND gT3kPreviewPlay = nullptr; // kept null for compatibility with older layout code
+HWND gT3kPreviewStop = nullptr;   // v2.9.15: single Play/Stop toggle
+HWND gT3kPreviewVolume = nullptr;
+HWND gT3kPreviewWav = nullptr;
+HWND gT3kPreviewBrowse = nullptr;
+HWND gT3kIrWav = nullptr;
+HWND gT3kIrBrowse = nullptr;
+HWND gT3kIrClear = nullptr;
+fs::path gT3kPreviewNam;
+fs::path gT3kPreviewWavPath;
+fs::path gT3kIrWavPath;
+bool gT3kPreviewBusy = false;
+bool gT3kLoadedAmpCab = false;
+ntc::NamPreviewPlayer gT3kPreviewPlayer;
+ntc::tone3000::Client gT3kClient;
+std::vector<ntc::tone3000::Tone> gT3kTones;
+std::vector<ntc::tone3000::Model> gT3kModelItems;
+bool gT3kBusy = false;
+int gT3kPage = 1;
+int gT3kTotalPages = 1;
+int gT3kTotalResults = 0;
+std::string gT3kLastQuery;
 HWND gInputEdit = nullptr;
+HWND gDestinationCombo = nullptr;
 HWND gOutEdit = nullptr;
 HWND gLoadFileButton = nullptr;
 HWND gLoadFolderButton = nullptr;
@@ -120,7 +194,7 @@ HWND gBrowseRecordedButton = nullptr;
 HWND gCorrectiveCheck = nullptr;
 HWND gCorrectiveEdit = nullptr;
 HWND gBrowseCorrectiveButton = nullptr;
-HWND gRefineCheck = nullptr;
+HWND gRefineSourceCombo = nullptr;
 HWND gRefineTargetEdit = nullptr;
 HWND gBrowseRefineTargetButton = nullptr;
 HWND gVersion = nullptr;
@@ -227,11 +301,11 @@ void applyFont(HWND h, HFONT font) {
 void applyFont(HWND h) { applyFont(h, gFont); }
 
 bool gp200UploaderTabSelected() {
-    return gBackendTabs && TabCtrl_GetCurSel(gBackendTabs) == 1;
+    return gBackendTabs && TabCtrl_GetCurSel(gBackendTabs) == 2;
 }
 
 bool gp5UploaderTabSelected() {
-    return gBackendTabs && TabCtrl_GetCurSel(gBackendTabs) == 2;
+    return gBackendTabs && TabCtrl_GetCurSel(gBackendTabs) == 3;
 }
 
 void showControl(HWND h, bool show) {
@@ -240,13 +314,13 @@ void showControl(HWND h, bool show) {
 
 void showConversionUi(HWND hwnd, bool show) {
     const HWND controls[] = {
-        gInputEdit, gOutEdit, gLoadFileButton, gLoadFolderButton, gBrowseButton,
+        gDestinationCombo, gInputEdit, gOutEdit, gLoadFileButton, gLoadFolderButton, gBrowseButton,
         gConvertButton, gOpenButton, gTailCombo, gRecordedEdit, gBrowseRecordedButton,
-        gCorrectiveCheck, gCorrectiveEdit, gBrowseCorrectiveButton, gRefineCheck,
+        gCorrectiveCheck, gCorrectiveEdit, gBrowseCorrectiveButton, gRefineSourceCombo,
         gRefineTargetEdit, gBrowseRefineTargetButton, gInfo
     };
     for (HWND h : controls) showControl(h, show);
-    for (int id : {1002,1003,1005,1006,1008,1009,1010})
+    for (int id : {1002,1003,1005,1006,1008,1009,1010,1027})
         showControl(GetDlgItem(hwnd, id), show);
 }
 
@@ -270,6 +344,527 @@ void showGp5UploaderUi(HWND hwnd, bool show) {
         showControl(GetDlgItem(hwnd, id), show);
 }
 
+bool tone3000TabSelected() {
+    return gBackendTabs && TabCtrl_GetCurSel(gBackendTabs) == 1;
+}
+
+void showTone3000Ui(HWND hwnd, bool show) {
+    const HWND controls[] = { gT3kKey, gT3kConnect, gT3kSearch, gT3kSearchButton,
+        gT3kResults, gT3kModels, gT3kUse, gT3kState, gT3kPrevious, gT3kPageLabel, gT3kNext, gT3kSort,
+        gT3kIrWav, gT3kIrBrowse, gT3kIrClear, gT3kPreviewWav, gT3kPreviewBrowse, gT3kPreviewStop, gT3kPreviewVolume };
+    for (HWND h : controls) showControl(h, show);
+    for (int id : {1019,1020,1021,1022,1023,1024,1025,1026}) showControl(GetDlgItem(hwnd, id), show);
+}
+
+struct T3kResultMessage { bool ok=false; std::string error; };
+struct T3kSearchMessage {
+    bool ok=false;
+    std::string error;
+    std::vector<ntc::tone3000::Tone> tones;
+    int page=1;
+    int totalPages=1;
+    int totalResults=0;
+};
+struct T3kModelsMessage { bool ok=false; std::string error; std::vector<ntc::tone3000::Model> models; };
+struct T3kDownloadMessage { bool ok=false; bool ampCab=false; std::string error; fs::path path; };
+struct T3kPreviewMessage { bool ok=false; bool playing=false; bool irLoaded=false; std::string error; int sampleRate=0; int irOriginalRate=0; };
+
+std::string utf8FromWide(const std::wstring& s) {
+    if (s.empty()) return {};
+    int n=WideCharToMultiByte(CP_UTF8,0,s.data(),static_cast<int>(s.size()),nullptr,0,nullptr,nullptr);
+    std::string out(static_cast<size_t>(n),'\0');
+    WideCharToMultiByte(CP_UTF8,0,s.data(),static_cast<int>(s.size()),out.data(),n,nullptr,nullptr);
+    return out;
+}
+std::wstring wideFromUtf8(const std::string& s) {
+    if (s.empty()) return {};
+    int n=MultiByteToWideChar(CP_UTF8,0,s.data(),static_cast<int>(s.size()),nullptr,0);
+    std::wstring out(static_cast<size_t>(n),L'\0');
+    MultiByteToWideChar(CP_UTF8,0,s.data(),static_cast<int>(s.size()),out.data(),n);
+    return out;
+}
+
+std::wstring loadSavedT3kKey() {
+    wchar_t buffer[512]{};
+    DWORD bytes = sizeof(buffer);
+    const LSTATUS status = RegGetValueW(HKEY_CURRENT_USER, L"Software\\NamToClo", L"Tone3000PublishableKey",
+                                        RRF_RT_REG_SZ, nullptr, buffer, &bytes);
+    if (status != ERROR_SUCCESS) return {};
+    return buffer;
+}
+
+void saveT3kKey(const std::wstring& key) {
+    if (key.empty()) return;
+    HKEY hKey = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\NamToClo", 0, nullptr, 0, KEY_SET_VALUE,
+                        nullptr, &hKey, nullptr) != ERROR_SUCCESS) return;
+    const DWORD bytes = static_cast<DWORD>((key.size() + 1) * sizeof(wchar_t));
+    RegSetValueExW(hKey, L"Tone3000PublishableKey", 0, REG_SZ,
+                   reinterpret_cast<const BYTE*>(key.c_str()), bytes);
+    RegCloseKey(hKey);
+}
+
+
+std::string loadSavedT3kRefreshToken() {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\NamToClo", 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS) return {};
+    DWORD type = 0, bytes = 0;
+    if (RegQueryValueExW(hKey, L"Tone3000RefreshToken", nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS ||
+        type != REG_BINARY || bytes == 0) {
+        RegCloseKey(hKey);
+        return {};
+    }
+    std::vector<BYTE> encrypted(bytes);
+    if (RegQueryValueExW(hKey, L"Tone3000RefreshToken", nullptr, nullptr, encrypted.data(), &bytes) != ERROR_SUCCESS) {
+        RegCloseKey(hKey);
+        return {};
+    }
+    RegCloseKey(hKey);
+
+    DATA_BLOB in{bytes, encrypted.data()};
+    DATA_BLOB out{};
+    if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)) return {};
+    std::string token(reinterpret_cast<const char*>(out.pbData), reinterpret_cast<const char*>(out.pbData) + out.cbData);
+    LocalFree(out.pbData);
+    return token;
+}
+
+void saveT3kRefreshToken(const std::string& token) {
+    if (token.empty()) return;
+    DATA_BLOB in{static_cast<DWORD>(token.size()), reinterpret_cast<BYTE*>(const_cast<char*>(token.data()))};
+    DATA_BLOB out{};
+    if (!CryptProtectData(&in, L"NamToClo Tone3000 OAuth", nullptr, nullptr, nullptr,
+                          CRYPTPROTECT_UI_FORBIDDEN, &out)) return;
+    HKEY hKey = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\NamToClo", 0, nullptr, 0, KEY_SET_VALUE,
+                        nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
+        RegSetValueExW(hKey, L"Tone3000RefreshToken", 0, REG_BINARY, out.pbData, out.cbData);
+        RegCloseKey(hKey);
+    }
+    LocalFree(out.pbData);
+}
+
+void clearSavedT3kRefreshToken() {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\NamToClo", 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
+        RegDeleteValueW(hKey, L"Tone3000RefreshToken");
+        RegCloseKey(hKey);
+    }
+}
+
+
+fs::path tone3000ModelsDirectory() {
+    wchar_t local[MAX_PATH]{};
+    if (SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, local) != S_OK) return {};
+    return fs::path(local) / L"NamToClo" / L"Tone3000" / L"models";
+}
+
+std::wstring normalizedT3kNamPath(const fs::path& path) {
+    std::error_code ec;
+    fs::path p = fs::absolute(path, ec);
+    if (ec) p = path;
+    std::wstring value = p.lexically_normal().wstring();
+    std::transform(value.begin(), value.end(), value.begin(), [](wchar_t c) {
+        return static_cast<wchar_t>(std::towlower(c));
+    });
+    return value;
+}
+
+std::set<std::wstring> loadPendingT3kNams() {
+    std::set<std::wstring> result;
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\NamToClo", 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS) return result;
+    DWORD type = 0, bytes = 0;
+    if (RegQueryValueExW(hKey, L"Tone3000PendingNams", nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS ||
+        type != REG_SZ || bytes < sizeof(wchar_t)) {
+        RegCloseKey(hKey);
+        return result;
+    }
+    std::vector<wchar_t> buffer(bytes / sizeof(wchar_t) + 1, L'\0');
+    if (RegQueryValueExW(hKey, L"Tone3000PendingNams", nullptr, nullptr,
+                         reinterpret_cast<BYTE*>(buffer.data()), &bytes) != ERROR_SUCCESS) {
+        RegCloseKey(hKey);
+        return result;
+    }
+    RegCloseKey(hKey);
+    std::wistringstream input(buffer.data());
+    std::wstring line;
+    while (std::getline(input, line)) {
+        if (!line.empty()) result.insert(line);
+    }
+    return result;
+}
+
+void savePendingT3kNams(const std::set<std::wstring>& paths) {
+    std::wstring value;
+    for (const auto& path : paths) {
+        if (!value.empty()) value += L'\n';
+        value += path;
+    }
+    HKEY hKey = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\NamToClo", 0, nullptr, 0, KEY_SET_VALUE,
+                        nullptr, &hKey, nullptr) != ERROR_SUCCESS) return;
+    if (value.empty()) {
+        RegDeleteValueW(hKey, L"Tone3000PendingNams");
+    } else {
+        const DWORD bytes = static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t));
+        RegSetValueExW(hKey, L"Tone3000PendingNams", 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(value.c_str()), bytes);
+    }
+    RegCloseKey(hKey);
+}
+
+bool isTone3000DownloadedNam(const fs::path& path) {
+    if (path.empty()) return false;
+    std::wstring ext = path.extension().wstring();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t c) {
+        return static_cast<wchar_t>(std::towlower(c));
+    });
+    if (ext != L".nam") return false;
+    const fs::path dir = tone3000ModelsDirectory();
+    if (dir.empty()) return false;
+    return normalizedT3kNamPath(path.parent_path()) == normalizedT3kNamPath(dir);
+}
+
+void registerTemporaryT3kNam(const fs::path& namPath) {
+    if (!isTone3000DownloadedNam(namPath)) return;
+    auto pending = loadPendingT3kNams();
+    pending.insert(normalizedT3kNamPath(namPath));
+    savePendingT3kNams(pending);
+}
+
+void preserveConvertedT3kNam(const fs::path& namPath) {
+    if (!isTone3000DownloadedNam(namPath)) return;
+    auto pending = loadPendingT3kNams();
+    pending.erase(normalizedT3kNamPath(namPath));
+    savePendingT3kNams(pending);
+}
+
+void cleanupUnconvertedT3kNams() {
+    auto pending = loadPendingT3kNams();
+    for (const auto& value : pending) {
+        const fs::path p(value);
+        if (!isTone3000DownloadedNam(p)) continue;
+        std::error_code ec;
+        fs::remove(p, ec);
+    }
+    savePendingT3kNams({});
+}
+
+void syncT3kConnectButton() {
+    if (gT3kConnect) setText(gT3kConnect, gT3kClient.connected() ? L"Disconnect" : L"Connect");
+}
+
+void updateT3kPagingControls() {
+    if (gT3kPageLabel) {
+        setText(gT3kPageLabel, L"Page " + std::to_wstring(gT3kPage) + L" of " + std::to_wstring(gT3kTotalPages));
+    }
+    if (gT3kPrevious) EnableWindow(gT3kPrevious, !gT3kBusy && gT3kClient.connected() && gT3kPage > 1);
+    if (gT3kNext) EnableWindow(gT3kNext, !gT3kBusy && gT3kClient.connected() && gT3kPage < gT3kTotalPages);
+}
+
+void setT3kBusy(bool busy) {
+    gT3kBusy=busy;
+    EnableWindow(gT3kKey,!busy && !gT3kClient.connected());
+    EnableWindow(gT3kConnect,!busy);
+    syncT3kConnectButton();
+    EnableWindow(gT3kSearch,!busy && gT3kClient.connected());
+    EnableWindow(gT3kSearchButton,!busy && gT3kClient.connected());
+    EnableWindow(gT3kSort,!busy && gT3kClient.connected());
+    EnableWindow(gT3kResults,!busy && gT3kClient.connected());
+    EnableWindow(gT3kModels,!busy && !gT3kModelItems.empty());
+    EnableWindow(gT3kUse,!busy && !gT3kModelItems.empty());
+    updateT3kPagingControls();
+}
+
+void startT3kAuth(HWND hwnd) {
+    if (gT3kBusy) return;
+    if (gT3kClient.connected()) {
+        gT3kClient.disconnect();
+        clearSavedT3kRefreshToken();
+        gT3kTones.clear(); gT3kModelItems.clear(); gT3kPage=1; gT3kTotalPages=1; gT3kTotalResults=0;
+        SendMessageW(gT3kResults,LB_RESETCONTENT,0,0); SendMessageW(gT3kModels,CB_RESETCONTENT,0,0);
+        setText(gT3kState,L"Disconnected. Your API key is still saved.");
+        setText(gStatus,L"Tone3000 disconnected.");
+        setT3kBusy(false);
+        return;
+    }
+    const auto keyText=getText(gT3kKey);
+    const auto key=utf8FromWide(keyText);
+    gT3kClient.setPublishableKey(key);
+    saveT3kKey(keyText);
+    setT3kBusy(true); setText(gT3kState,L"Opening Tone3000 authorization in your browser...");
+    std::thread([hwnd]{ auto* m=new T3kResultMessage; m->ok=gT3kClient.authenticateInteractive(m->error); PostMessageW(hwnd,WM_APP_T3K_AUTH_DONE,0,reinterpret_cast<LPARAM>(m)); }).detach();
+}
+
+void startT3kAutoLogin(HWND hwnd) {
+    if (gT3kBusy || gT3kClient.connected()) return;
+    const auto keyText = getText(gT3kKey);
+    const auto refreshToken = loadSavedT3kRefreshToken();
+    if (keyText.empty() || refreshToken.empty()) return;
+    gT3kClient.setPublishableKey(utf8FromWide(keyText));
+    setT3kBusy(true);
+    setText(gT3kState,L"Restoring previous Tone3000 session...");
+    std::thread([hwnd, refreshToken]{
+        auto* m = new T3kResultMessage;
+        m->ok = gT3kClient.restoreSession(refreshToken, m->error);
+        PostMessageW(hwnd, WM_APP_T3K_AUTOLOGIN_DONE, 0, reinterpret_cast<LPARAM>(m));
+    }).detach();
+}
+
+std::string currentT3kSort() {
+    if (!gT3kSort) return "best-match";
+    const int sel = static_cast<int>(SendMessageW(gT3kSort, CB_GETCURSEL, 0, 0));
+    switch (sel) {
+    case 1: return "newest";
+    case 2: return "oldest";
+    case 3: return "trending";
+    case 4: return "downloads-all-time";
+    default: return "best-match";
+    }
+}
+
+void startT3kSearchPage(HWND hwnd, int page, bool newQuery) {
+    if (gT3kBusy || !gT3kClient.connected()) return;
+    if (newQuery) {
+        gT3kLastQuery=utf8FromWide(getText(gT3kSearch));
+        gT3kPage=1;
+        page=1;
+    }
+    if (gT3kLastQuery.empty()) gT3kLastQuery=utf8FromWide(getText(gT3kSearch));
+    if (page < 1) page=1;
+    if (gT3kTotalPages > 0 && !newQuery && page > gT3kTotalPages) return;
+    const auto q=gT3kLastQuery;
+    const auto sort=currentT3kSort();
+    setT3kBusy(true);
+    setText(gT3kState,L"Searching NAM A2 captures on Tone3000...");
+    std::thread([hwnd,q,page,sort]{
+        auto* m=new T3kSearchMessage;
+        m->page=page;
+        m->ok=gT3kClient.searchNamTones(q,page,sort,m->tones,m->totalPages,m->totalResults,m->error);
+        PostMessageW(hwnd,WM_APP_T3K_SEARCH_DONE,0,reinterpret_cast<LPARAM>(m));
+    }).detach();
+}
+
+void startT3kSearch(HWND hwnd) { startT3kSearchPage(hwnd,1,true); }
+void startT3kPrevious(HWND hwnd) { if (gT3kPage>1) startT3kSearchPage(hwnd,gT3kPage-1,false); }
+void startT3kNext(HWND hwnd) { if (gT3kPage<gT3kTotalPages) startT3kSearchPage(hwnd,gT3kPage+1,false); }
+
+void startT3kModels(HWND hwnd) {
+    if (gT3kBusy) return;
+    int sel=static_cast<int>(SendMessageW(gT3kResults,LB_GETCURSEL,0,0));
+    if(sel<0 || sel>=static_cast<int>(gT3kTones.size())) return;
+    auto id=gT3kTones[static_cast<size_t>(sel)].id; setT3kBusy(true); setText(gT3kState,L"Loading models for selected tone...");
+    std::thread([hwnd,id]{ auto* m=new T3kModelsMessage; m->ok=gT3kClient.listModels(id,m->models,m->error); PostMessageW(hwnd,WM_APP_T3K_MODELS_DONE,0,reinterpret_cast<LPARAM>(m)); }).detach();
+}
+
+std::wstring safeTone3000FileStem(const std::string& modelName) {
+    std::wstring name = wideFromUtf8(modelName);
+    if (name.empty()) name = L"Tone3000 NAM";
+
+    // Windows file names cannot contain these characters. Preserve the model
+    // name as closely as possible so the downloaded NAM and generated CLO
+    // share the same human-readable base name.
+    constexpr wchar_t invalid[] = L"<>:\\|?*\"";
+    for (auto& c : name) {
+        if (c < 32 || std::wcschr(invalid, c) != nullptr) c = L'_';
+    }
+    while (!name.empty() && (name.back() == L'.' || name.back() == L' ')) name.pop_back();
+    if (name.empty()) name = L"Tone3000 NAM";
+
+    // Avoid Windows reserved device names while keeping the visible model name.
+    std::wstring upper = name;
+    std::transform(upper.begin(), upper.end(), upper.begin(), [](wchar_t c) {
+        return static_cast<wchar_t>(std::towupper(c));
+    });
+    static const std::array<const wchar_t*, 22> reserved = {
+        L"CON", L"PRN", L"AUX", L"NUL",
+        L"COM1", L"COM2", L"COM3", L"COM4", L"COM5", L"COM6", L"COM7", L"COM8", L"COM9",
+        L"LPT1", L"LPT2", L"LPT3", L"LPT4", L"LPT5", L"LPT6", L"LPT7", L"LPT8", L"LPT9"
+    };
+    for (const auto* r : reserved) {
+        if (upper == r) { name += L"_"; break; }
+    }
+    return name;
+}
+
+void startT3kDownload(HWND hwnd) {
+    if(gT3kBusy) return;
+    int sel=static_cast<int>(SendMessageW(gT3kModels,CB_GETCURSEL,0,0)); if(sel<0||sel>=static_cast<int>(gT3kModelItems.size())) return;
+    const auto model=gT3kModelItems[static_cast<size_t>(sel)];
+    bool ampCab=false;
+    const int toneSel=static_cast<int>(SendMessageW(gT3kResults,LB_GETCURSEL,0,0));
+    if(toneSel>=0 && toneSel<static_cast<int>(gT3kTones.size()))
+        ampCab = gT3kTones[static_cast<size_t>(toneSel)].gear == "amp-cab";
+    fs::path dir=tone3000ModelsDirectory();
+    fs::path dest=dir/(safeTone3000FileStem(model.name)+L".nam");
+    setT3kBusy(true); setText(gT3kState,L"Downloading selected NAM...");
+    std::thread([hwnd,model,dest,ampCab]{ auto* m=new T3kDownloadMessage; m->path=dest; m->ampCab=ampCab; m->ok=gT3kClient.downloadModel(model,dest,m->error); PostMessageW(hwnd,WM_APP_T3K_DOWNLOAD_DONE,0,reinterpret_cast<LPARAM>(m)); }).detach();
+}
+
+void stopT3kPreview();
+void startT3kPreview(HWND hwnd, bool forceLoad);
+
+void updateT3kPlayStopButton() {
+    if (!gT3kPreviewStop) return;
+    if (gT3kPreviewBusy) {
+        setText(gT3kPreviewStop, L"Loading...");
+        EnableWindow(gT3kPreviewStop, FALSE);
+        return;
+    }
+    const bool canPlay = !gT3kPreviewNam.empty() && !gT3kPreviewWavPath.empty() && gT3kPreviewPlayer.ready();
+    setText(gT3kPreviewStop, gT3kPreviewPlayer.playing() ? L"Stop" : L"Play");
+    EnableWindow(gT3kPreviewStop, canPlay ? TRUE : FALSE);
+}
+
+void updateT3kIrAvailability() {
+    // TONE3000's canonical gear value for an Amp + Cab capture is "amp-cab".
+    // Keep the chosen IR path in memory while bypassing it for such captures.
+    const BOOL enabled = gT3kLoadedAmpCab ? FALSE : TRUE;
+    if (gT3kIrWav) EnableWindow(gT3kIrWav, enabled);
+    if (gT3kIrBrowse) EnableWindow(gT3kIrBrowse, enabled);
+    if (gT3kIrClear) EnableWindow(gT3kIrClear, enabled && !gT3kIrWavPath.empty());
+}
+
+fs::path effectiveT3kPreviewIr() {
+    return gT3kLoadedAmpCab ? fs::path{} : gT3kIrWavPath;
+}
+
+void chooseT3kPreviewWav(HWND owner) {
+    wchar_t file[32768]{};
+    if (!gT3kPreviewWavPath.empty()) {
+        const auto current = gT3kPreviewWavPath.wstring();
+        wcsncpy_s(file, std::size(file), current.c_str(), _TRUNCATE);
+    }
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"Mono WAV audio (*.wav)\0*.wav\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(file));
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrDefExt = L"wav";
+    if (!GetOpenFileNameW(&ofn)) return;
+
+    stopT3kPreview();
+    gT3kPreviewWavPath = fs::path(file);
+    setText(gT3kPreviewWav, gT3kPreviewWavPath.wstring());
+    // Load/prepare the new source but never start playback automatically.
+    if (!gT3kPreviewNam.empty()) startT3kPreview(owner, true);
+    else updateT3kPlayStopButton();
+}
+
+void chooseT3kIrWav(HWND owner) {
+    if (gT3kLoadedAmpCab) return;
+    wchar_t file[32768]{};
+    if (!gT3kIrWavPath.empty()) {
+        const auto current = gT3kIrWavPath.wstring();
+        wcsncpy_s(file, std::size(file), current.c_str(), _TRUNCATE);
+    }
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"Cabinet IR WAV (*.wav)\0*.wav\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(file));
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrDefExt = L"wav";
+    if (!GetOpenFileNameW(&ofn)) return;
+
+    stopT3kPreview();
+    gT3kIrWavPath = fs::path(file);
+    setText(gT3kIrWav, gT3kIrWavPath.wstring());
+    updateT3kIrAvailability();
+
+    // Keep the Tone3000 preview IR and the converter Corrective IR selection
+    // in sync. Deliberately do NOT tick Apply corrective IR here.
+    if (gCorrectiveEdit) setText(gCorrectiveEdit, gT3kIrWavPath.wstring());
+
+    setText(gT3kState, L"Cabinet IR selected and assigned to Corrective IR (not activated). Preview is ready after loading; press Play to hear it.");
+    if (!gT3kPreviewNam.empty() && !gT3kPreviewWavPath.empty()) startT3kPreview(owner, true);
+}
+
+void clearT3kIr(HWND owner) {
+    if (gT3kLoadedAmpCab) return;
+    stopT3kPreview();
+    gT3kIrWavPath.clear();
+    setText(gT3kIrWav, L"");
+    updateT3kIrAvailability();
+    setText(gT3kState, L"Cabinet IR cleared. Preview will use the NAM alone; press Play when ready.");
+    if (!gT3kPreviewNam.empty() && !gT3kPreviewWavPath.empty()) startT3kPreview(owner, true);
+}
+
+void stopT3kPreview(){
+    gT3kPreviewPlayer.stop();
+    if (gT3kPreviewStop) {
+        HWND owner = GetParent(gT3kPreviewStop);
+        if (owner) KillTimer(owner, 2);
+    }
+    updateT3kPlayStopButton();
+}
+
+void startT3kPreview(HWND hwnd,bool forceLoad){
+    if(gT3kPreviewBusy||gT3kPreviewNam.empty()) return;
+    const fs::path input=gT3kPreviewWavPath;
+    std::error_code ec;
+    if(input.empty()){
+        setText(gT3kState,L"NAM loaded. Choose a mono WAV for the preview.");
+        updateT3kPlayStopButton();
+        return;
+    }
+    if(!fs::exists(input,ec)||ec){
+        setText(gT3kState,L"Preview WAV not found. Choose another WAV file.");
+        updateT3kPlayStopButton();
+        return;
+    }
+    if(!forceLoad && gT3kPreviewPlayer.ready()){
+        std::string error;
+        if(gT3kPreviewPlayer.play(error)){
+            setText(gT3kPreviewStop,L"Stop");
+            EnableWindow(gT3kPreviewStop,TRUE);
+            SetTimer(hwnd,2,200,nullptr);
+            setText(gT3kState, effectiveT3kPreviewIr().empty()
+                ? L"Real-time NAM preview playing."
+                : L"Real-time NAM preview playing through cabinet IR.");
+        }else{
+            setText(gT3kState,L"Preview failed: "+wideFromUtf8(error));
+            updateT3kPlayStopButton();
+        }
+        return;
+    }
+
+    // A changed NAM/WAV/IR is prepared asynchronously, but v2.9.15 never
+    // starts playback as a side-effect of loading.
+    gT3kPreviewBusy=true;
+    updateT3kPlayStopButton();
+    setText(gT3kState, effectiveT3kPreviewIr().empty()
+        ? L"Loading NAM and selected WAV for preview..."
+        : L"Loading NAM + cabinet IR for preview...");
+    const fs::path nam=gT3kPreviewNam;
+    const fs::path ir=effectiveT3kPreviewIr();
+    std::thread([hwnd,nam,input,ir]{
+        auto* m=new T3kPreviewMessage;
+        m->ok=gT3kPreviewPlayer.load(nam,input,ir,m->error);
+        if(m->ok){
+            m->sampleRate=gT3kPreviewPlayer.sampleRate();
+            m->irLoaded=gT3kPreviewPlayer.irLoaded();
+            m->irOriginalRate=gT3kPreviewPlayer.irOriginalSampleRate();
+            m->playing=false;
+        }
+        PostMessageW(hwnd,WM_APP_T3K_PREVIEW_DONE,0,reinterpret_cast<LPARAM>(m));
+    }).detach();
+}
+
+void toggleT3kPreview(HWND hwnd) {
+    if (gT3kPreviewBusy) return;
+    if (gT3kPreviewPlayer.playing()) {
+        stopT3kPreview();
+        setText(gT3kState, L"Preview stopped.");
+        return;
+    }
+    startT3kPreview(hwnd, false);
+}
+
 void refreshUploaderDetection() {
     const auto d = ntc::gp200::detectGp200Midi();
     setText(gUploaderDevice, ntc::gp200::describeDetection(d));
@@ -287,24 +882,30 @@ void refreshGp5Detection() {
 void updateBackendUi() {
     HWND hwnd = gBackendTabs ? GetParent(gBackendTabs) : nullptr;
     const int selected = gBackendTabs ? TabCtrl_GetCurSel(gBackendTabs) : 0;
-    const bool gp200 = selected == 1;
-    const bool gp5 = selected == 2;
+    const bool t3k = selected == 1;
+    const bool gp200 = selected == 2;
+    const bool gp5 = selected == 3;
     showConversionUi(hwnd, selected == 0);
+    showTone3000Ui(hwnd, t3k);
     showUploaderUi(hwnd, gp200);
     showGp5UploaderUi(hwnd, gp5);
-    if (gp200) {
+    if (t3k) {
+        setText(gSubtitle, L"Browse NAM captures on Tone3000 and load a model directly into the converter.");
+        setText(gStatus, gT3kClient.connected() ? L"Tone3000 connected." : L"Enter your Tone3000 publishable API key and connect.");
+        setT3kBusy(gT3kBusy);
+    } else if (gp200) {
         setText(gSubtitle, L"Upload CLO files directly to a GP-200 SnapTone slot via USB MIDI.");
         refreshUploaderDetection();
         if (!gUploadBusy) setText(gStatus, L"GP-200 Uploader ready.");
     } else if (gp5) {
-        setText(gSubtitle, L"Adapt a CLO to the GP-5 A128/B512 transfer format and upload it to SnapTone 51-80.");
+        setText(gSubtitle, L"Adapt a CLO to the GP-5/GP-50 A128/B512 transfer format and upload it to SnapTone 51-80.");
         refreshGp5Detection();
-        if (!gGp5UploadBusy) setText(gStatus, L"GP-5 Uploader ready.");
+        if (!gGp5UploadBusy) setText(gStatus, L"GP-5/GP-50 Uploader ready.");
     } else {
         setText(gSubtitle, L"Convert one NAM or batch-convert every NAM in a selected folder.");
         setText(gInfo,
             L"Place nam_input_wav.wav next to NamToClo.exe. The original stimulus is always used.\r\n"
-            L"Tail / Reamp, Corrective IR and Tone Match are optional.");
+            L"Tail / Reamp and Corrective IR are optional. Tone Match applies a direct correction at the final size.");
         if (!gBusy) setText(gStatus, L"Ready to convert.");
     }
     if (hwnd) InvalidateRect(hwnd, nullptr, TRUE);
@@ -313,6 +914,7 @@ void updateBackendUi() {
 void enableControls(bool enable) {
     gBusy = !enable;
     EnableWindow(gBackendTabs, enable);
+    EnableWindow(gDestinationCombo, enable);
     EnableWindow(gLoadFileButton, enable);
     EnableWindow(gLoadFolderButton, enable);
     EnableWindow(gBrowseButton, enable);
@@ -320,7 +922,7 @@ void enableControls(bool enable) {
     EnableWindow(gOpenButton, enable);
     EnableWindow(gTailCombo, enable);
     EnableWindow(gCorrectiveCheck, enable);
-    EnableWindow(gRefineCheck, enable);
+    EnableWindow(gRefineSourceCombo, enable);
     if (!enable) {
         EnableWindow(gRefineTargetEdit, FALSE);
         EnableWindow(gBrowseRefineTargetButton, FALSE);
@@ -486,10 +1088,10 @@ void updateTailControls() {
     EnableWindow(gCorrectiveEdit, correctiveEnabled ? TRUE : FALSE);
     EnableWindow(gBrowseCorrectiveButton, correctiveEnabled ? TRUE : FALSE);
 
-    EnableWindow(gRefineCheck, TRUE);
-    const bool refineEnabled = SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    EnableWindow(gRefineTargetEdit, refineEnabled ? TRUE : FALSE);
-    EnableWindow(gBrowseRefineTargetButton, refineEnabled ? TRUE : FALSE);
+    EnableWindow(gRefineSourceCombo, TRUE);
+    const bool customToneMatch = SendMessageW(gRefineSourceCombo, CB_GETCURSEL, 0, 0) == 1;
+    EnableWindow(gRefineTargetEdit, customToneMatch ? TRUE : FALSE);
+    EnableWindow(gBrowseRefineTargetButton, customToneMatch ? TRUE : FALSE);
 }
 
 void postStatus(HWND hwnd, const std::wstring& s) {
@@ -528,9 +1130,14 @@ void startConversion(HWND hwnd) {
     }
 
     ntc::CloRefineConfig refine;
-    refine.enabled = SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    refine.passes = 4;
-    refine.referenceWav = fs::path(getText(gRefineTargetEdit));
+    refine.destination = SendMessageW(gDestinationCombo, CB_GETCURSEL, 0, 0) == 1
+        ? ntc::CloDestination::Gp5 : ntc::CloDestination::Gp200;
+    const bool customToneMatch = SendMessageW(gRefineSourceCombo, CB_GETCURSEL, 0, 0) == 1;
+    refine.referenceWav = customToneMatch ? fs::path(getText(gRefineTargetEdit)) : fs::path{};
+    if (customToneMatch && refine.referenceWav.empty()) {
+        MessageBoxW(hwnd, L"Select a custom Tone Match reference WAV file.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
+        return;
+    }
 
     enableControls(false);
     ntc::NativeConverterConfig nativeConfig;
@@ -633,7 +1240,7 @@ void chooseGp5Clo(HWND hwnd) {
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
     if (GetOpenFileNameW(&ofn)) {
         setText(gGp5CloEdit, file);
-        setText(gStatus, L"CLO selected. Choose SnapTone 51-80 and press Upload to GP-5.");
+        setText(gStatus, L"CLO selected. Choose SnapTone 51-80 and press Upload to GP-5/GP-50.");
     }
 }
 
@@ -641,12 +1248,12 @@ void startGp5Uploader(HWND hwnd) {
     if (gGp5UploadBusy) return;
     const std::wstring clo = getText(gGp5CloEdit);
     if (clo.empty()) {
-        MessageBoxW(hwnd, L"Select a .clo file first.", L"GP-5 Uploader", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(hwnd, L"Select a .clo file first.", L"GP-5/GP-50 Uploader", MB_OK | MB_ICONINFORMATION);
         return;
     }
     const int selection = static_cast<int>(SendMessageW(gGp5SlotCombo, CB_GETCURSEL, 0, 0));
     if (selection < 0 || selection >= 30) {
-        MessageBoxW(hwnd, L"Select a destination SnapTone slot (51-80).", L"GP-5 Uploader", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(hwnd, L"Select a destination SnapTone slot (51-80).", L"GP-5/GP-50 Uploader", MB_OK | MB_ICONINFORMATION);
         return;
     }
     // The combo contains visible SnapTone 51..80, while the GP-5 protocol
@@ -657,7 +1264,7 @@ void startGp5Uploader(HWND hwnd) {
     if (!d.inputFound || !d.outputFound) {
         const auto msg = ntc::gp5::describeDetection(d);
         setText(gGp5Device, msg);
-        MessageBoxW(hwnd, msg.c_str(), L"GP-5 Uploader", MB_OK | MB_ICONWARNING);
+        MessageBoxW(hwnd, msg.c_str(), L"GP-5/GP-50 Uploader", MB_OK | MB_ICONWARNING);
         return;
     }
 
@@ -669,7 +1276,7 @@ void startGp5Uploader(HWND hwnd) {
     EnableWindow(gGp5UploadButton, FALSE);
     SendMessageW(gGp5Progress, PBM_SETRANGE32, 0, 146);
     SendMessageW(gGp5Progress, PBM_SETPOS, 0, 0);
-    setText(gStatus, L"Preparing GP-5 A128/B512 transfer...");
+    setText(gStatus, L"Preparing GP-5/GP-50 A128/B512 transfer...");
 
     std::thread([hwnd, clo, slot] {
         auto result = ntc::gp5::uploadCloToGp5(fs::path(clo), slot,
@@ -707,7 +1314,7 @@ void computeLayout(int clientW, int clientH) {
     gUi.footer = RECT{ 0, clientH - footerH, clientW, clientH };
     gUi.infoBox = RECT{ gUi.sectionRecorded.left + 108, gUi.sectionRecorded.top + 62,
                         gUi.sectionRecorded.right - 16, gUi.sectionRecorded.top + 96 };
-    gUi.uploaderCard = RECT{ margin, 145, clientW - margin, 535 };
+    gUi.uploaderCard = RECT{ margin, 145, clientW - margin, 675 };
 }
 
 void layoutControls(HWND hwnd) {
@@ -725,6 +1332,8 @@ void layoutControls(HWND hwnd) {
 
     // Keep a visible gap between each label and its field/control.
     moveCtrl(GetDlgItem(hwnd, 1002), contentX, gUi.sectionInput.top + 8, 230, 20);
+    moveCtrl(GetDlgItem(hwnd, 1027), gUi.sectionInput.right - 346, gUi.sectionInput.top + 8, 58, 20);
+    moveCtrl(gDestinationCombo, gUi.sectionInput.right - 286, gUi.sectionInput.top + 4, 270, 120);
     const int inputButtonX = gUi.sectionInput.right - sectionRightInset - 244;
     const int inputEditW = inputButtonX - 12 - contentX;
     moveCtrl(gInputEdit, contentX, gUi.sectionInput.top + 35, inputEditW, 28);
@@ -754,7 +1363,7 @@ void layoutControls(HWND hwnd) {
     moveCtrl(gBrowseCorrectiveButton, gUi.sectionCorrective.right - sectionRightInset - 124, gUi.sectionCorrective.top + 27, 124, 32);
 
     moveCtrl(GetDlgItem(hwnd, 1009), contentX, gUi.sectionRefine.top + 7, 360, 22);
-    moveCtrl(gRefineCheck, contentX, gUi.sectionRefine.top + 32, 560, 24);
+    moveCtrl(gRefineSourceCombo, contentX, gUi.sectionRefine.top + 32, 360, 120);
     moveCtrl(GetDlgItem(hwnd, 1010), contentX, gUi.sectionRefine.top + 58, 430, 20);
     const int refineTargetEditW = (gUi.sectionRefine.right - sectionRightInset - 124 - 8) - contentX;
     moveCtrl(gRefineTargetEdit, contentX, gUi.sectionRefine.top + 78, refineTargetEditW, 28);
@@ -767,6 +1376,38 @@ void layoutControls(HWND hwnd) {
     const int ux = gUi.uploaderCard.left + 34;
     const int ur = gUi.uploaderCard.right - 34;
     moveCtrl(GetDlgItem(hwnd, 1011), ux, gUi.uploaderCard.top + 28, 220, 22);
+    moveCtrl(GetDlgItem(hwnd,1019), ux, gUi.uploaderCard.top + 18, 220, 24);
+    moveCtrl(gT3kKey, ux, gUi.uploaderCard.top + 46, ur - ux - 136, 30);
+    moveCtrl(gT3kConnect, ur - 124, gUi.uploaderCard.top + 42, 124, 34);
+    moveCtrl(GetDlgItem(hwnd,1020), ux, gUi.uploaderCard.top + 88, 220, 24);
+    moveCtrl(gT3kSearch, ux, gUi.uploaderCard.top + 116, ur - ux - 136, 30);
+    moveCtrl(gT3kSearchButton, ur - 124, gUi.uploaderCard.top + 112, 124, 34);
+    moveCtrl(GetDlgItem(hwnd,1021), ux, gUi.uploaderCard.top + 158, 72, 24);
+    moveCtrl(GetDlgItem(hwnd,1023), ux + 82, gUi.uploaderCard.top + 158, 52, 24);
+    moveCtrl(gT3kSort, ux + 136, gUi.uploaderCard.top + 154, 190, 180);
+    moveCtrl(gT3kPrevious, ur - 330, gUi.uploaderCard.top + 154, 96, 28);
+    moveCtrl(gT3kPageLabel, ur - 226, gUi.uploaderCard.top + 158, 122, 22);
+    moveCtrl(gT3kNext, ur - 96, gUi.uploaderCard.top + 154, 96, 28);
+    moveCtrl(gT3kResults, ux, gUi.uploaderCard.top + 184, ur - ux, 142);
+    moveCtrl(GetDlgItem(hwnd,1022), ux, gUi.uploaderCard.top + 338, 220, 24);
+    moveCtrl(gT3kModels, ux, gUi.uploaderCard.top + 364, ur - ux - 220, 220);
+    moveCtrl(gT3kUse, ur - 208, gUi.uploaderCard.top + 360, 208, 36);
+    moveCtrl(gT3kState, ux, gUi.uploaderCard.top + 408, ur - ux, 24);
+
+    // Cabinet IR row. Keep it above Preview so the signal chain reads NAM -> IR -> output.
+    moveCtrl(GetDlgItem(hwnd,1025), ux, gUi.uploaderCard.top + 440, 92, 22);
+    moveCtrl(gT3kIrWav, ux + 94, gUi.uploaderCard.top + 436, ur - ux - 94 - 300, 30);
+    moveCtrl(gT3kIrBrowse, ur - 290, gUi.uploaderCard.top + 436, 116, 32);
+    moveCtrl(gT3kIrClear, ur - 166, gUi.uploaderCard.top + 436, 74, 32);
+
+    // Preview row: source WAV, one Play/Stop toggle and a compact output-volume fader.
+    moveCtrl(GetDlgItem(hwnd,1024), ux, gUi.uploaderCard.top + 486, 92, 22);
+    moveCtrl(gT3kPreviewWav, ux + 94, gUi.uploaderCard.top + 482, ur - ux - 94 - 390, 30);
+    moveCtrl(gT3kPreviewBrowse, ur - 380, gUi.uploaderCard.top + 482, 116, 32);
+    moveCtrl(GetDlgItem(hwnd,1026), ur - 256, gUi.uploaderCard.top + 488, 28, 20);
+    moveCtrl(gT3kPreviewVolume, ur - 228, gUi.uploaderCard.top + 484, 116, 28);
+    moveCtrl(gT3kPreviewStop, ur - 104, gUi.uploaderCard.top + 482, 104, 32);
+
     moveCtrl(gUploaderCloEdit, ux, gUi.uploaderCard.top + 56, ur - ux - 136, 30);
     moveCtrl(gUploaderBrowseButton, ur - 124, gUi.uploaderCard.top + 52, 124, 34);
     moveCtrl(GetDlgItem(hwnd, 1012), ux, gUi.uploaderCard.top + 112, 220, 22);
@@ -822,19 +1463,28 @@ void createUi(HWND hwnd) {
     tab.mask = TCIF_TEXT;
     tab.pszText = const_cast<LPWSTR>(L"Convert to CLO");
     TabCtrl_InsertItem(gBackendTabs, 0, &tab);
-    tab.pszText = const_cast<LPWSTR>(L"GP-200 Uploader");
+    tab.pszText = const_cast<LPWSTR>(L"Tone3000");
     TabCtrl_InsertItem(gBackendTabs, 1, &tab);
-    tab.pszText = const_cast<LPWSTR>(L"GP-5 Uploader");
+    tab.pszText = const_cast<LPWSTR>(L"GP-200 Uploader");
     TabCtrl_InsertItem(gBackendTabs, 2, &tab);
+    tab.pszText = const_cast<LPWSTR>(L"GP-5/GP-50 Uploader");
+    TabCtrl_InsertItem(gBackendTabs, 3, &tab);
     TabCtrl_SetCurSel(gBackendTabs, 0);
 
     createSectionLabel(hwnd, 1002, L"Input NAM or folder");
+    createSectionLabel(hwnd, 1027, L"Target");
+    gDestinationCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+        0, 0, 270, 120, hwnd, controlId(IDC_CLO_DESTINATION), nullptr, nullptr);
+    applyFont(gDestinationCombo);
+    SendMessageW(gDestinationCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"GP-200 (B1024)"));
+    SendMessageW(gDestinationCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"GP-5 (B512)"));
+    SendMessageW(gDestinationCombo, CB_SETCURSEL, 0, 0);
     createSectionLabel(hwnd, 1003, L"Output folder");
     createSectionLabel(hwnd, 1005, L"Tail / Reamp source");
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
     createSectionLabel(hwnd, 1008, L"Corrective IR");
-    createSectionLabel(hwnd, 1009, L"Tone Match");
-    createSectionLabel(hwnd, 1010, L"Tone Match reference WAV (optional; first 20 s used)");
+    createSectionLabel(hwnd, 1009, L"Tone Match (direct correction)");
+    createSectionLabel(hwnd, 1010, L"Custom Tone Match reference WAV (first 20 s used)");
 
     gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                  0, 0, 100, 30, hwnd, controlId(IDC_INPUT_PATH), nullptr, nullptr);
@@ -878,10 +1528,13 @@ void createUi(HWND hwnd) {
                                              WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                              0, 0, 120, 34, hwnd, controlId(IDC_BROWSE_CORRECTIVE_IR), nullptr, nullptr);
 
-    gRefineCheck = CreateWindowW(L"BUTTON", L"Apply Tone Match (slow)",
-                                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                 0, 0, 520, 24, hwnd, controlId(IDC_REFINE_CLO), nullptr, nullptr);
-    applyFont(gRefineCheck);
+    gRefineSourceCombo = CreateWindowW(L"COMBOBOX", L"",
+                                        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                        0, 0, 520, 120, hwnd, controlId(IDC_REFINE_SOURCE), nullptr, nullptr);
+    applyFont(gRefineSourceCombo);
+    SendMessageW(gRefineSourceCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Reference audio (default)"));
+    SendMessageW(gRefineSourceCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Custom WAV..."));
+    SendMessageW(gRefineSourceCombo, CB_SETCURSEL, 0, 0);
     gRefineTargetEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                         WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                         0, 0, 100, 30, hwnd, controlId(IDC_REFINE_TARGET_PATH), nullptr, nullptr);
@@ -894,6 +1547,45 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1012, L"Destination SnapTone slot");
     createSectionLabel(hwnd, 1013, L"USB MIDI device");
     createSectionLabel(hwnd, 1014, L"Transfer progress");
+
+    createSectionLabel(hwnd, 1019, L"Publishable API key");
+    gT3kKey = CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|ES_AUTOHSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_KEY),nullptr,nullptr); applyFont(gT3kKey);
+    gT3kConnect = CreateWindowW(L"BUTTON",L"Connect",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_CONNECT),nullptr,nullptr); applyFont(gT3kConnect);
+    createSectionLabel(hwnd, 1020, L"Search NAM captures (A2)");
+    gT3kSearch = CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|ES_AUTOHSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_SEARCH),nullptr,nullptr); applyFont(gT3kSearch);
+    gT3kSearchButton = CreateWindowW(L"BUTTON",L"Search",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_SEARCH_BUTTON),nullptr,nullptr); applyFont(gT3kSearchButton);
+    createSectionLabel(hwnd, 1021, L"Results");
+    createSectionLabel(hwnd, 1023, L"Sort by");
+    gT3kSort = CreateWindowW(L"COMBOBOX",L"",WS_CHILD|CBS_DROPDOWNLIST|WS_VSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_SORT),nullptr,nullptr); applyFont(gT3kSort);
+    for (const wchar_t* option : {L"Best match", L"Newest", L"Oldest", L"Trending", L"Most downloaded"})
+        SendMessageW(gT3kSort, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(option));
+    SendMessageW(gT3kSort, CB_SETCURSEL, 0, 0);
+    gT3kPrevious = CreateWindowW(L"BUTTON",L"Previous",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_PREVIOUS),nullptr,nullptr); applyFont(gT3kPrevious);
+    gT3kPageLabel = CreateWindowW(L"STATIC",L"Page 1 of 1",WS_CHILD|SS_CENTER,0,0,0,0,hwnd,controlId(IDC_T3K_PAGE),nullptr,nullptr); applyFont(gT3kPageLabel);
+    gT3kNext = CreateWindowW(L"BUTTON",L"Next",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_NEXT),nullptr,nullptr); applyFont(gT3kNext);
+    gT3kResults = CreateWindowExW(WS_EX_CLIENTEDGE,L"LISTBOX",L"",WS_CHILD|LBS_NOTIFY|WS_VSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_RESULTS),nullptr,nullptr); applyFont(gT3kResults);
+    createSectionLabel(hwnd, 1022, L"NAM model");
+    gT3kModels = CreateWindowW(L"COMBOBOX",L"",WS_CHILD|CBS_DROPDOWNLIST|WS_VSCROLL,0,0,0,0,hwnd,controlId(IDC_T3K_MODELS),nullptr,nullptr); applyFont(gT3kModels);
+    gT3kUse = CreateWindowW(L"BUTTON",L"Load selected NAM",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_USE),nullptr,nullptr); applyFont(gT3kUse);
+    gT3kState = CreateWindowW(L"STATIC",L"Not connected.",WS_CHILD|SS_LEFTNOWORDWRAP,0,0,0,0,hwnd,controlId(IDC_T3K_STATE),nullptr,nullptr); applyFont(gT3kState);
+    createSectionLabel(hwnd, 1025, L"Cabinet IR");
+    gT3kIrWav = CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|ES_AUTOHSCROLL|ES_READONLY,0,0,0,0,hwnd,controlId(IDC_T3K_IR_WAV),nullptr,nullptr); applyFont(gT3kIrWav);
+    gT3kIrBrowse = CreateWindowW(L"BUTTON",L"Browse IR...",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_IR_BROWSE),nullptr,nullptr); applyFont(gT3kIrBrowse);
+    gT3kIrClear = CreateWindowW(L"BUTTON",L"Clear",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_IR_CLEAR),nullptr,nullptr); applyFont(gT3kIrClear); EnableWindow(gT3kIrClear,FALSE);
+
+    createSectionLabel(hwnd, 1024, L"Preview WAV");
+    gT3kPreviewWav = CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|ES_AUTOHSCROLL|ES_READONLY,0,0,0,0,hwnd,controlId(IDC_T3K_PREVIEW_WAV),nullptr,nullptr); applyFont(gT3kPreviewWav);
+    gT3kPreviewBrowse = CreateWindowW(L"BUTTON",L"Browse WAV...",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_PREVIEW_BROWSE),nullptr,nullptr); applyFont(gT3kPreviewBrowse);
+    createSectionLabel(hwnd, 1026, L"Vol");
+    gT3kPreviewVolume = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD|TBS_HORZ|TBS_NOTICKS, 0,0,0,0, hwnd, controlId(IDC_T3K_PREVIEW_VOLUME), nullptr, nullptr);
+    SendMessageW(gT3kPreviewVolume, TBM_SETRANGE, TRUE, MAKELPARAM(0,100));
+    SendMessageW(gT3kPreviewVolume, TBM_SETPOS, TRUE, 100);
+    gT3kPreviewPlayer.setOutputGain(1.0f);
+    gT3kPreviewStop = CreateWindowW(L"BUTTON",L"Play",WS_CHILD|BS_OWNERDRAW,0,0,0,0,hwnd,controlId(IDC_T3K_PREVIEW_STOP),nullptr,nullptr); applyFont(gT3kPreviewStop); EnableWindow(gT3kPreviewStop,FALSE);
+    const auto savedT3kKey = loadSavedT3kKey();
+    if (!savedT3kKey.empty()) setText(gT3kKey, savedT3kKey);
+    updateT3kPagingControls();
+    if (!savedT3kKey.empty() && !loadSavedT3kRefreshToken().empty()) startT3kAutoLogin(hwnd);
 
     gUploaderCloEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                        WS_CHILD | ES_AUTOHSCROLL | ES_READONLY,
@@ -945,7 +1637,7 @@ void createUi(HWND hwnd) {
         SendMessageW(gGp5SlotCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
     }
     SendMessageW(gGp5SlotCombo, CB_SETCURSEL, 0, 0);
-    gGp5Device = CreateWindowW(L"STATIC", L"GP-5 MIDI not scanned yet.", WS_CHILD,
+    gGp5Device = CreateWindowW(L"STATIC", L"GP-5/GP-50 MIDI not scanned yet.", WS_CHILD,
                                0, 0, 100, 24, hwnd, controlId(IDC_GP5_DEVICE), nullptr, nullptr);
     applyFont(gGp5Device);
     gGp5RescanButton = CreateWindowW(L"BUTTON", L"Rescan", WS_CHILD | BS_OWNERDRAW,
@@ -955,7 +1647,7 @@ void createUi(HWND hwnd) {
                                    0, 0, 100, 22, hwnd, controlId(IDC_GP5_PROGRESS), nullptr, nullptr);
     SendMessageW(gGp5Progress, PBM_SETRANGE32, 0, 146);
     SendMessageW(gGp5Progress, PBM_SETPOS, 0, 0);
-    gGp5UploadButton = CreateWindowW(L"BUTTON", L"Upload to GP-5", WS_CHILD | BS_OWNERDRAW,
+    gGp5UploadButton = CreateWindowW(L"BUTTON", L"Upload to GP-5/GP-50", WS_CHILD | BS_OWNERDRAW,
                                      0, 0, 240, 38, hwnd, controlId(IDC_GP5_UPLOAD), nullptr, nullptr);
     applyFont(gGp5UploadButton);
 
@@ -1055,7 +1747,7 @@ void paintBackground(HWND hwnd, HDC hdc) {
 
     drawBitmap(hdc, gLogoBitmap, 28, 18);
 
-    if (gp200UploaderTabSelected() || gp5UploaderTabSelected()) {
+    if (tone3000TabSelected() || gp200UploaderTabSelected() || gp5UploaderTabSelected()) {
         drawRoundedRect(hdc, gUi.uploaderCard, kColorCard, kColorBorder, 18);
     } else {
         drawSectionCard(hdc, gUi.sectionInput, 0);
@@ -1153,14 +1845,23 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SetTextColor(hdc, kColorSubtleText);
             return reinterpret_cast<LRESULT>(gInfoBrush);
         }
+        if (ctrl == gT3kState) {
+            // This status text changes frequently. Give it an opaque card
+            // background so old transparent text is fully erased on update.
+            SetBkMode(hdc, OPAQUE);
+            SetBkColor(hdc, kColorCard);
+            SetTextColor(hdc, kColorText);
+            return reinterpret_cast<LRESULT>(gCardBrush);
+        }
         if (ctrl == gSubtitle || ctrl == GetDlgItem(hwnd, 1001)
             || ctrl == GetDlgItem(hwnd, 1002) || ctrl == GetDlgItem(hwnd, 1003) || ctrl == GetDlgItem(hwnd, 1004)
             || ctrl == GetDlgItem(hwnd, 1005) || ctrl == GetDlgItem(hwnd, 1006) || ctrl == GetDlgItem(hwnd, 1007)
-            || ctrl == GetDlgItem(hwnd, 1008) || ctrl == GetDlgItem(hwnd, 1009) || ctrl == GetDlgItem(hwnd, 1010)
+            || ctrl == GetDlgItem(hwnd, 1027) || ctrl == GetDlgItem(hwnd, 1008) || ctrl == GetDlgItem(hwnd, 1009) || ctrl == GetDlgItem(hwnd, 1010)
             || ctrl == GetDlgItem(hwnd, 1011) || ctrl == GetDlgItem(hwnd, 1012) || ctrl == GetDlgItem(hwnd, 1013)
             || ctrl == GetDlgItem(hwnd, 1014) || ctrl == gUploaderDevice
             || ctrl == GetDlgItem(hwnd, 1015) || ctrl == GetDlgItem(hwnd, 1016)
-            || ctrl == GetDlgItem(hwnd, 1017) || ctrl == GetDlgItem(hwnd, 1018) || ctrl == gGp5Device) {
+            || ctrl == GetDlgItem(hwnd, 1017) || ctrl == GetDlgItem(hwnd, 1018) || ctrl == gGp5Device
+            || ctrl == GetDlgItem(hwnd,1019) || ctrl == GetDlgItem(hwnd,1020) || ctrl == GetDlgItem(hwnd,1021) || ctrl == GetDlgItem(hwnd,1022) || ctrl == GetDlgItem(hwnd,1023) || ctrl == GetDlgItem(hwnd,1024)) {
             SetTextColor(hdc, ctrl == gSubtitle ? kColorSubtleText : kColorText);
             return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
         }
@@ -1187,6 +1888,22 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         break;
     }
+    case WM_HSCROLL:
+        if (reinterpret_cast<HWND>(lParam) == gT3kPreviewVolume) {
+            const int pos = static_cast<int>(SendMessageW(gT3kPreviewVolume, TBM_GETPOS, 0, 0));
+            gT3kPreviewPlayer.setOutputGain(static_cast<float>(pos) / 100.0f);
+            return 0;
+        }
+        break;
+    case WM_TIMER:
+        if (wParam == 2) {
+            if (!gT3kPreviewPlayer.playing()) {
+                KillTimer(hwnd, 2);
+                updateT3kPlayStopButton();
+            }
+            return 0;
+        }
+        break;
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDC_LOAD_FILE: chooseNam(hwnd); return 0;
@@ -1198,14 +1915,38 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_APPLY_CORRECTIVE_IR:
             if (HIWORD(wParam) == BN_CLICKED) updateTailControls();
             return 0;
-        case IDC_REFINE_CLO:
-            if (HIWORD(wParam) == BN_CLICKED) updateTailControls();
+        case IDC_REFINE_SOURCE:
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                if (SendMessageW(gRefineSourceCombo, CB_GETCURSEL, 0, 0) == 0)
+                    setText(gRefineTargetEdit, L"");
+                updateTailControls();
+            }
             return 0;
         case IDC_TAIL_MODE:
             if (HIWORD(wParam) == CBN_SELCHANGE) updateTailControls();
             return 0;
         case IDC_CONVERT: startConversion(hwnd); return 0;
         case IDC_OPEN_OUTPUT: openOutputFolder(hwnd); return 0;
+        case IDC_T3K_CONNECT: startT3kAuth(hwnd); return 0;
+        case IDC_T3K_SEARCH_BUTTON: startT3kSearch(hwnd); return 0;
+        case IDC_T3K_PREVIOUS: startT3kPrevious(hwnd); return 0;
+        case IDC_T3K_NEXT: startT3kNext(hwnd); return 0;
+        case IDC_T3K_SORT:
+            if (HIWORD(wParam)==CBN_SELCHANGE && gT3kClient.connected() && !gT3kBusy && !getText(gT3kSearch).empty())
+                startT3kSearchPage(hwnd,1,true);
+            return 0;
+        case IDC_T3K_SEARCH:
+            if (HIWORD(wParam)==EN_UPDATE) return 0;
+            break;
+        case IDC_T3K_RESULTS:
+            if (HIWORD(wParam)==LBN_SELCHANGE) startT3kModels(hwnd);
+            return 0;
+        case IDC_T3K_USE: startT3kDownload(hwnd); return 0;
+        case IDC_T3K_IR_BROWSE: chooseT3kIrWav(hwnd); return 0;
+        case IDC_T3K_IR_CLEAR: clearT3kIr(hwnd); return 0;
+        case IDC_T3K_PREVIEW_BROWSE: chooseT3kPreviewWav(hwnd); return 0;
+        case IDC_T3K_PREVIEW_PLAY: return 0; // retired in v2.9.15
+        case IDC_T3K_PREVIEW_STOP: toggleT3kPreview(hwnd); return 0;
         case IDC_UPLOADER_BROWSE: chooseUploaderClo(hwnd); return 0;
         case IDC_UPLOADER_RESCAN:
             refreshUploaderDetection();
@@ -1233,7 +1974,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (ext == L".clo") {
                     if (gp5UploaderTabSelected()) {
                         setText(gGp5CloEdit, p.wstring());
-                        setText(gStatus, L"CLO selected. Choose SnapTone 51-80 and press Upload to GP-5.");
+                        setText(gStatus, L"CLO selected. Choose SnapTone 51-80 and press Upload to GP-5/GP-50.");
                     } else {
                         setText(gUploaderCloEdit, p.wstring());
                         setText(gStatus, L"CLO selected. Choose a destination slot and press Upload to GP-200.");
@@ -1241,8 +1982,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 } else {
                     const bool gp5 = gp5UploaderTabSelected();
                     MessageBoxW(hwnd,
-                                gp5 ? L"The GP-5 Uploader accepts .clo files." : L"The GP-200 Uploader accepts .clo files.",
-                                gp5 ? L"GP-5 Uploader" : L"GP-200 Uploader", MB_OK | MB_ICONINFORMATION);
+                                gp5 ? L"The GP-5/GP-50 Uploader accepts .clo files." : L"The GP-200 Uploader accepts .clo files.",
+                                gp5 ? L"GP-5/GP-50 Uploader" : L"GP-200 Uploader", MB_OK | MB_ICONINFORMATION);
                 }
             } else if (fs::is_directory(p, ec) && !ec) setNamFolder(p);
             else setSingleNam(p);
@@ -1253,6 +1994,83 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_APP_STATUS: {
         std::unique_ptr<std::wstring> s(reinterpret_cast<std::wstring*>(lParam));
         if (s) setText(gStatus, *s);
+        return 0;
+    }
+    case WM_APP_T3K_AUTH_DONE: {
+        std::unique_ptr<T3kResultMessage> m(reinterpret_cast<T3kResultMessage*>(lParam));
+        if(m && m->ok){
+            saveT3kRefreshToken(gT3kClient.refreshToken());
+            setText(gT3kState,L"Connected. Session will be restored automatically next time.");
+            setText(gStatus,L"Tone3000 connected.");
+        }
+        else if(m){ auto e=wideFromUtf8(m->error); setText(gT3kState,L"Connection failed: "+e); MessageBoxW(hwnd,e.c_str(),L"Tone3000",MB_OK|MB_ICONWARNING); }
+        setT3kBusy(false); return 0;
+    }
+    case WM_APP_T3K_AUTOLOGIN_DONE: {
+        std::unique_ptr<T3kResultMessage> m(reinterpret_cast<T3kResultMessage*>(lParam));
+        if(m && m->ok){
+            saveT3kRefreshToken(gT3kClient.refreshToken());
+            setText(gT3kState,L"Connected automatically. Search for a NAM capture.");
+            setText(gStatus,L"Tone3000 session restored.");
+        } else {
+            clearSavedT3kRefreshToken();
+            gT3kClient.disconnect();
+            setText(gT3kState,L"Saved session expired. Press Connect to authorize again.");
+            setText(gStatus,L"Tone3000 needs authorization again.");
+        }
+        setT3kBusy(false); return 0;
+    }
+    case WM_APP_T3K_SEARCH_DONE: {
+        std::unique_ptr<T3kSearchMessage> m(reinterpret_cast<T3kSearchMessage*>(lParam)); gT3kTones.clear(); gT3kModelItems.clear(); SendMessageW(gT3kResults,LB_RESETCONTENT,0,0); SendMessageW(gT3kModels,CB_RESETCONTENT,0,0);
+        if(m && m->ok){
+            saveT3kRefreshToken(gT3kClient.refreshToken());
+            gT3kPage=m->page; gT3kTotalPages=m->totalPages; gT3kTotalResults=m->totalResults;
+            gT3kTones=std::move(m->tones);
+            for(const auto&t:gT3kTones){ std::wstring label=wideFromUtf8(t.title+" — "+t.creator+" ["+t.gear+"]"); SendMessageW(gT3kResults,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str())); }
+            setText(gT3kState,L"Showing "+std::to_wstring(gT3kTones.size())+L" of "+std::to_wstring(gT3kTotalResults)+L" NAM A2 tones. Select one to load its models.");
+        }
+        else if(m) setText(gT3kState,L"Search failed: "+wideFromUtf8(m->error)); setT3kBusy(false); return 0;
+    }
+    case WM_APP_T3K_MODELS_DONE: {
+        std::unique_ptr<T3kModelsMessage> m(reinterpret_cast<T3kModelsMessage*>(lParam)); gT3kModelItems.clear(); SendMessageW(gT3kModels,CB_RESETCONTENT,0,0);
+        if(m && m->ok){ saveT3kRefreshToken(gT3kClient.refreshToken()); gT3kModelItems=std::move(m->models); for(const auto&x:gT3kModelItems){ auto label=wideFromUtf8(x.name+" | "+x.size+" | NAM v"+x.architectureVersion); SendMessageW(gT3kModels,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str())); } if(!gT3kModelItems.empty()) SendMessageW(gT3kModels,CB_SETCURSEL,0,0); setText(gT3kState,L"Select a model and press Load selected NAM."); }
+        else if(m) setText(gT3kState,L"Could not load models: "+wideFromUtf8(m->error)); setT3kBusy(false); return 0;
+    }
+    case WM_APP_T3K_DOWNLOAD_DONE: {
+        std::unique_ptr<T3kDownloadMessage> m(reinterpret_cast<T3kDownloadMessage*>(lParam));
+        if(m && m->ok){
+            saveT3kRefreshToken(gT3kClient.refreshToken()); registerTemporaryT3kNam(m->path); setSingleNam(m->path);
+            gT3kPreviewNam=m->path; gT3kLoadedAmpCab=m->ampCab;
+            stopT3kPreview(); updateT3kIrAvailability();
+            setText(gStatus,L"Tone3000 NAM downloaded and loaded into the converter.");
+            if (gT3kLoadedAmpCab && !gT3kIrWavPath.empty())
+                setText(gT3kState,L"Amp + Cab NAM loaded. Cabinet IR is bypassed but kept selected; it will return automatically with an Amp NAM.");
+            if (!gT3kPreviewWavPath.empty()) startT3kPreview(hwnd,true); else updateT3kPlayStopButton();
+        }
+        else if(m){ auto e=wideFromUtf8(m->error); setText(gT3kState,L"Download failed: "+e); MessageBoxW(hwnd,e.c_str(),L"Tone3000",MB_OK|MB_ICONWARNING); }
+        setT3kBusy(false); return 0;
+    }
+    case WM_APP_T3K_PREVIEW_DONE: {
+        std::unique_ptr<T3kPreviewMessage> m(reinterpret_cast<T3kPreviewMessage*>(lParam));
+        gT3kPreviewBusy=false;
+        updateT3kPlayStopButton();
+        if(m && m->ok){
+            if (gT3kLoadedAmpCab && !gT3kIrWavPath.empty()) {
+                setText(gT3kState,L"Preview ready. Amp + Cab capture: selected Cabinet IR is bypassed and preserved. Press Play.");
+            } else if (m->irLoaded) {
+                std::wstring text = L"Preview ready through NAM + cabinet IR";
+                if (m->irOriginalRate > 0 && m->irOriginalRate != 48000)
+                    text += L" (IR " + std::to_wstring(m->irOriginalRate) + L" -> 48000 Hz)";
+                else
+                    text += L" (IR 48000 Hz)";
+                text += L". Press Play.";
+                setText(gT3kState, text);
+            } else {
+                setText(gT3kState,L"Preview ready at "+std::to_wstring(m->sampleRate)+L" Hz through the loaded NAM. Press Play.");
+            }
+        } else if(m){
+            setText(gT3kState,L"Could not prepare real-time preview: "+wideFromUtf8(m->error));
+        }
         return 0;
     }
     case WM_APP_UPLOAD_PROGRESS: {
@@ -1304,9 +2122,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             setText(gStatus, r->message);
             if (r->ok) {
                 SendMessageW(gGp5Progress, PBM_SETPOS, 146, 0);
-                MessageBoxW(hwnd, r->message.c_str(), L"GP-5 Uploader", MB_OK | MB_ICONINFORMATION);
+                MessageBoxW(hwnd, r->message.c_str(), L"GP-5/GP-50 Uploader", MB_OK | MB_ICONINFORMATION);
             } else {
-                MessageBoxW(hwnd, r->message.c_str(), L"GP-5 Uploader", MB_OK | MB_ICONERROR);
+                MessageBoxW(hwnd, r->message.c_str(), L"GP-5/GP-50 Uploader", MB_OK | MB_ICONERROR);
             }
         }
         return 0;
@@ -1317,7 +2135,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         updateBackendUi();
         updateTailControls();
         if (r && r->ok) {
-            const std::wstring resultMessage = L"Conversion complete.\r\n\r\nGP-200 CLO 1024:\r\n" + r->gp2001024.wstring();
+            preserveConvertedT3kNam(r->inputNam);
+            const std::wstring resultMessage = L"Conversion complete.\r\n\r\n" +
+                std::wstring(r->destination == ntc::CloDestination::Gp5 ? L"GP-5 CLO B512" : L"GP-200 CLO B1024") +
+                L":\r\n" + r->outputClo.wstring() +
+                L"\r\n\r\nTone Match: direct correction" +
+                L"\r\nFinal spectral RMSE (dB): " + std::to_wstring(r->toneMatch.finalRmseDb);
             setText(gStatus, L"Done. CLO file generated successfully.");
             const std::wstring doneTitle = L"NAM to CLO";
             MessageBoxW(hwnd, resultMessage.c_str(), doneTitle.c_str(), MB_ICONINFORMATION | MB_OK);
@@ -1337,6 +2160,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             setText(gStatus, L"Batch conversion did not find any NAM files.");
             MessageBoxW(hwnd, L"No .nam files were found in the selected folder.", L"Batch conversion", MB_ICONINFORMATION | MB_OK);
             return 0;
+        }
+
+        for (const auto& item : r->items) {
+            if (item.ok) preserveConvertedT3kNam(item.inputNam);
         }
 
         std::wstring resultMessage = L"Batch conversion complete.\r\n\r\nProcessed: " + std::to_wstring(r->total)
@@ -1362,6 +2189,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         DestroyWindow(hwnd); return 0;
     case WM_DESTROY:
+        gT3kPreviewPlayer.stop();
+        if (!gBusy) cleanupUnconvertedT3kNams();
         destroyResources();
         PostQuitMessage(0); return 0;
     }
@@ -1373,9 +2202,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     // Prevent Windows DPI virtualization from inflating the whole window on 125%/150% displays.
     SetProcessDPIAware();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    // Remove Tone3000 downloads that were never successfully converted.
+    // Only downloads registered as temporary by this version are cleaned; older cache files are left untouched.
+    cleanupUnconvertedT3kNams();
     INITCOMMONCONTROLSEX icc{};
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_TAB_CLASSES | ICC_PROGRESS_CLASS;
+    icc.dwICC = ICC_TAB_CLASSES | ICC_PROGRESS_CLASS | ICC_BAR_CLASSES;
     InitCommonControlsEx(&icc);
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
