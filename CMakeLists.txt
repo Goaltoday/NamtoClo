@@ -56,7 +56,14 @@ else()
         GIT_REPOSITORY https://github.com/sdatkinson/NeuralAmpModelerCore.git
         GIT_TAG v0.5.4
         GIT_SHALLOW TRUE
-        GIT_SUBMODULES_RECURSE TRUE
+        # Fetch NAMCore's direct dependencies only. AudioDSPTools also declares
+        # Eigen as a nested submodule, but this project already includes the
+        # pinned NAMCore Eigen path below; recursively fetching the duplicate
+        # clone makes CI depend on a second GitLab download.
+        GIT_SUBMODULES
+            Dependencies/AudioDSPTools
+            Dependencies/eigen
+        GIT_SUBMODULES_RECURSE FALSE
     )
     FetchContent_GetProperties(ntc_namcore_src)
     if(NOT ntc_namcore_src_POPULATED)
